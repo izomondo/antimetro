@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" fill="none">
+  <defs>
+    <linearGradient id="bg" x1="512" y1="0" x2="512" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#222631"/>
+      <stop offset="100%" stop-color="#202430"/>
+    </linearGradient>
+    <linearGradient id="m" x1="51" y1="512" x2="973" y2="512" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#23E548"/>
+      <stop offset="14%" stop-color="#25E549"/>
+      <stop offset="25%" stop-color="#54DE44"/>
+      <stop offset="43%" stop-color="#EBC129"/>
+      <stop offset="53%" stop-color="#F0B826"/>
+      <stop offset="73%" stop-color="#E7731B"/>
+      <stop offset="87%" stop-color="#DF4014"/>
+      <stop offset="100%" stop-color="#DF4014"/>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="204" fill="url(#bg)"/>
+  <path fill="url(#m)" d="M 51 675.5 A 461 461 0 0 1 234.8 296.6 A 72 72 0 0 1 335.7 311 L 512 549 L 688.3 311 A 72 72 0 0 1 789.2 296.6 A 461 461 0 0 1 973 675.5 A 66.5 66.5 0 0 1 840 675.5 A 328 328 0 0 0 748 437 L 565.4 682.1 A 66.6 66.6 0 0 1 458.6 682.1 L 276 437 A 328 328 0 0 0 184 675.5 A 66.5 66.5 0 0 1 51 675.5 Z"/>
+</svg>

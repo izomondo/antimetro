@@ -1,0 +1,4365 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Antimetro</title>
+<script src="/preload.js"></script>
+<style>
+  :root,
+  html[data-theme="light"] {
+    --am-bg: var(--background, #f8f9fa);
+    --am-fg: var(--foreground, #1f2328);
+    --am-muted: var(--muted-foreground, #656d76);
+    --am-card: var(--card, rgba(127, 127, 127, 0.06));
+    --am-border: var(--card-border, var(--border, rgba(127, 127, 127, 0.20)));
+    --am-accent: var(--primary, #2563eb);
+    --am-blue: #2563eb;
+    --am-ok: #16a34a;
+    --am-warn1: #d97706;
+    --am-crit: #c24141;
+    --am-heart: #ef4444;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --am-bg: var(--background, #14161a);
+      --am-fg: var(--foreground, #e6edf3);
+      --am-muted: var(--muted-foreground, #8b949e);
+      --am-card: var(--card, rgba(255, 255, 255, 0.045));
+      --am-border: var(--card-border, var(--border, rgba(255, 255, 255, 0.13)));
+      --am-accent: var(--primary, #3b82f6);
+      --am-blue: #3b82f6;
+      --am-ok: #22c55e;
+      --am-warn1: #f59e0b;
+      --am-crit: #d45252;
+      --am-heart: #ef4444;
+    }
+  }
+  html[data-theme="dark"] {
+    --am-bg: var(--background, #14161a);
+    --am-fg: var(--foreground, #e6edf3);
+    --am-muted: var(--muted-foreground, #8b949e);
+    --am-card: var(--card, rgba(255, 255, 255, 0.045));
+    --am-border: var(--card-border, var(--border, rgba(255, 255, 255, 0.13)));
+    --am-accent: var(--primary, #3b82f6);
+    --am-blue: #3b82f6;
+    --am-ok: #22c55e;
+    --am-warn1: #f59e0b;
+    --am-crit: #d45252;
+    --am-heart: #ef4444;
+  }
+  html {
+    --am-border-active: color-mix(in srgb, var(--am-fg) 32%, transparent);
+  }
+
+  * { box-sizing: border-box; }
+  html, body {
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    background: var(--am-bg);
+    color: var(--am-fg);
+    font-family: "Google Sans", "Inter", "Rubik", "Segoe UI Variable Text", "Segoe UI Variable", "Calibri", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+    font-size: 14px;
+    line-height: 1.4;
+    text-rendering: optimizeLegibility;
+  }
+  button, input, textarea {
+    font-family: inherit;
+    font-size: inherit;
+  }
+  button:focus,
+  button:focus-visible,
+  a:focus,
+  a:focus-visible {
+    outline: none;
+  }
+  /* Sleek Antigravity-style auto-hiding thin scrollbars */
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  ::-webkit-scrollbar-button {
+    display: none;
+    width: 0;
+    height: 0;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: transparent;
+    border-radius: 999px;
+  }
+  .notes-card:hover .notes-input::-webkit-scrollbar-thumb,
+  .notes-input.is-scrolling::-webkit-scrollbar-thumb,
+  .note-block:hover .block-editor::-webkit-scrollbar-thumb,
+  .block-editor.is-scrolling::-webkit-scrollbar-thumb,
+  .search-block:hover .search-body::-webkit-scrollbar-thumb,
+  .search-body.is-scrolling::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--am-fg) 22%, transparent);
+  }
+  .notes-input::-webkit-scrollbar-thumb:hover,
+  .block-editor::-webkit-scrollbar-thumb:hover,
+  .search-body::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--am-fg) 38%, transparent);
+  }
+  .wrap {
+    padding: 12px 10px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    width: 100%;
+    max-width: 1000px;
+    min-height: 100%;
+    height: 100%;
+    margin: 0 auto;
+  }
+  .main-stack {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    flex-shrink: 0;
+    width: 100%;
+    max-width: 500px;
+    margin: 0 auto;
+  }
+
+  /* Cards */
+  .card {
+    background: var(--am-card);
+    border: 1px solid var(--am-border);
+    border-radius: 12px;
+    padding: 12px 12px;
+    flex-shrink: 0;
+  }
+
+  /* Hero Meter */
+  .hero-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .big-num {
+    font-size: 20px;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -0.02em;
+    line-height: 1.1;
+    transition: opacity 0.25s ease;
+  }
+  .unit {
+    font-size: 14px;
+    color: var(--am-muted);
+    margin-top: 3px;
+    font-variant-numeric: tabular-nums;
+  }
+  .delta {
+    font-size: 14px;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    color: var(--am-ok);
+    line-height: 1.1;
+    white-space: nowrap;
+    transition: color 0.35s ease;
+  }
+
+  .bar-wrap { margin-top: 13px; }
+  .bar-track {
+    position: relative;
+    height: 7px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--am-fg) 12%, transparent);
+  }
+  .bar-fill-clip {
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .bar-fill {
+    position: relative;
+    height: 100%;
+    width: 0%;
+    border-radius: 999px;
+    background: var(--am-ok);
+    overflow: hidden;
+    filter: saturate(0.8);
+    transition: background-color 0.35s ease;
+  }
+  .bar-fill::after {
+    content: "";
+    position: absolute;
+    inset: 0;
+    border-radius: inherit;
+    background: linear-gradient(
+      90deg,
+      #3b82f6 0%,
+      #8b5cf6 8.33%,
+      #ec4899 16.66%,
+      #f59e0b 25%,
+      #22c55e 33.33%,
+      #06b6d4 41.66%,
+      #3b82f6 50%,
+      #8b5cf6 58.33%,
+      #ec4899 66.66%,
+      #f59e0b 75%,
+      #22c55e 83.33%,
+      #06b6d4 91.66%,
+      #3b82f6 100%
+    );
+    background-size: 200% 100%;
+    background-position: 100% 0;
+    opacity: 0;
+    transition: opacity 0.4s ease;
+    pointer-events: none;
+  }
+  .bar-fill.thinking::after {
+    opacity: 1;
+    animation: aiFlow 3.45s linear infinite;
+  }
+  .bar-fill.thinking.compacting::after {
+    animation-direction: reverse;
+  }
+  @keyframes aiFlow {
+    0%   { background-position: 100% 0; }
+    100% { background-position: 0% 0; }
+  }
+  .auto-pin {
+    position: absolute;
+    top: -2px;
+    bottom: -2px;
+    width: 4px;
+    border-radius: 2px;
+    background: var(--am-accent);
+    box-shadow: 0 0 0 1px var(--am-bg);
+    opacity: 0;
+    transform: translateX(-50%) scaleY(0.15);
+    transition: opacity 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+                transform 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+                left 0.3s cubic-bezier(0.22, 1, 0.36, 1);
+    pointer-events: none;
+    z-index: 2;
+  }
+  .auto-pin.visible {
+    opacity: 1;
+    transform: translateX(-50%) scaleY(1);
+  }
+  .bar-ticks {
+    position: relative;
+    height: 22px;
+    margin-top: 5px;
+    font-size: 14px;
+    color: var(--am-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .tick {
+    position: absolute;
+    transform: translateX(-50%);
+    white-space: nowrap;
+  }
+  .tick::before {
+    content: "";
+    position: absolute;
+    top: -12px;
+    left: 50%;
+    width: 1px;
+    height: 7px;
+    background: color-mix(in srgb, var(--am-fg) 26%, transparent);
+  }
+  .tick.edge-left {
+    left: 0%;
+    transform: none;
+  }
+  .tick.edge-left::before { display: none; }
+  .tick.edge-right {
+    right: 0%;
+    left: auto;
+    transform: none;
+  }
+  .tick.edge-right::before { display: none; }
+  .tick.hit {
+    font-weight: 600;
+    color: var(--am-fg);
+  }
+
+  /* Info Card */
+  .info-card {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px;
+  }
+  .dates-stack {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    font-size: 14px;
+  }
+  .date-line {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    color: var(--am-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .date-line strong {
+    color: var(--am-fg);
+    font-weight: 600;
+  }
+  .info-row {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 4px 8px;
+    font-size: 14px;
+  }
+  .info-item {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    color: var(--am-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .info-item strong {
+    color: var(--am-fg);
+    font-weight: 600;
+  }
+  .info-divider {
+    height: 1px;
+    background: var(--am-border);
+  }
+  .compact-state {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--am-muted);
+    white-space: nowrap;
+  }
+  .compact-state.yes {
+    color: var(--am-ok);
+    font-weight: 600;
+  }
+  @keyframes undoSpin {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(-360deg); }
+  }
+
+  /* Auto-compact & Action Card */
+  .ctrl-card {
+    display: grid;
+    grid-template-columns: auto minmax(34px, 1fr) auto;
+    row-gap: 11px;
+    column-gap: 6px;
+    align-items: center;
+    padding: 12px 12px;
+  }
+  .toggle-group {
+    grid-column: 1;
+    grid-row: 1;
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+  .toggle-label {
+    display: inline-flex;
+    align-items: center;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 20px;
+    color: var(--am-fg);
+    white-space: nowrap;
+    user-select: none;
+    cursor: pointer;
+  }
+  .switch {
+    position: relative;
+    display: inline-block;
+    width: 32px;
+    height: 18px;
+    flex-shrink: 0;
+  }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute;
+    inset: 0;
+    cursor: pointer;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--am-fg) 22%, transparent);
+    transition: background-color 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .slider::before {
+    content: "";
+    position: absolute;
+    width: 12px;
+    height: 12px;
+    left: 3px;
+    top: 3px;
+    border-radius: 50%;
+    background: #fff;
+    transition: transform 0.25s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .switch input:checked + .slider {
+    background: color-mix(in srgb, var(--am-accent) 22%, color-mix(in srgb, var(--am-fg) 22%, var(--am-bg)));
+  }
+  .switch.auto-boost input:checked + .slider {
+    background: var(--am-accent);
+  }
+  .switch.auto-fade .slider {
+    transition: background-color 1.5s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .switch input:checked + .slider::before { transform: translateX(14px); }
+
+  .limit-label {
+    grid-column: 2;
+    grid-row: 1;
+    justify-self: end;
+    display: inline-flex;
+    align-items: center;
+    font-size: 14px;
+    line-height: 20px;
+    color: var(--am-muted);
+    white-space: nowrap;
+  }
+  .input-wrap {
+    grid-column: 3;
+    grid-row: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+    width: 100%;
+    min-width: 58px;
+    height: 28px;
+    padding: 0 6px;
+    border-radius: 8px;
+    border: 1px solid var(--am-border);
+    background: var(--am-bg);
+    cursor: text;
+    transition: border-color 0.15s ease;
+  }
+  .input-wrap:focus-within {
+    border-color: var(--am-border-active);
+  }
+  .input-wrap input::-webkit-outer-spin-button,
+  .input-wrap input::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .input-wrap input {
+    width: 3ch;
+    min-width: 2ch;
+    flex: 0 0 auto;
+    height: 20px;
+    padding: 0;
+    margin: 0;
+    border: none;
+    background: transparent;
+    color: var(--am-fg);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 20px;
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+  .input-wrap input:focus,
+  .input-wrap input:focus-visible {
+    outline: none;
+  }
+  .input-wrap span {
+    display: inline-flex;
+    align-items: center;
+    height: 20px;
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 20px;
+    color: var(--am-muted);
+    pointer-events: none;
+    flex-shrink: 0;
+  }
+
+  .btn {
+    padding: 7px 12px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--am-fg) 18%, transparent);
+    background: color-mix(in srgb, var(--am-fg) 5%, var(--am-bg));
+    color: var(--am-fg);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.25;
+    cursor: pointer;
+    transition: background-color 0.15s, border-color 0.15s, color 0.15s;
+  }
+  .btn:hover:not(:disabled),
+  .btn.active {
+    background: color-mix(in srgb, var(--am-fg) 10%, var(--am-bg));
+    border-color: var(--am-border-active);
+  }
+  .btn:disabled { opacity: 0.42; cursor: default; }
+  .btn:disabled.is-working,
+  .btn:disabled.is-ok,
+  .btn:disabled.is-err {
+    opacity: 0.92;
+  }
+  .btn-compact {
+    grid-column: 1;
+    grid-row: 2;
+    width: 100%;
+    min-width: 0;
+    padding: 7px 8px;
+    text-align: center;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .working-wrap {
+    position: relative;
+    display: inline-block;
+  }
+  .working-dots {
+    position: absolute;
+    left: 100%;
+    top: 0;
+    white-space: pre;
+  }
+  .btn.is-working {
+    color: var(--am-blue);
+    border-color: color-mix(in srgb, var(--am-blue) 45%, transparent);
+    background: color-mix(in srgb, var(--am-blue) 8%, var(--am-bg));
+  }
+  .btn.is-ok {
+    color: var(--am-ok);
+    border-color: color-mix(in srgb, var(--am-ok) 45%, transparent);
+  }
+  .btn.is-err {
+    color: var(--am-crit);
+    border-color: color-mix(in srgb, var(--am-crit) 45%, transparent);
+  }
+  .undo-slot {
+    grid-column: 2;
+    grid-row: 2;
+    justify-self: start;
+    align-self: stretch;
+    width: 100%;
+    max-width: 52px;
+    display: flex;
+    align-items: stretch;
+    justify-content: center;
+  }
+  .btn-undo {
+    display: none;
+    align-items: center;
+    justify-content: center;
+    height: 100%;
+    aspect-ratio: 1 / 1;
+    min-width: 34px;
+    border-radius: 50%;
+    padding: 0;
+  }
+  .btn-undo.visible {
+    display: inline-flex;
+  }
+  .btn-undo:disabled {
+    opacity: 0.85;
+    cursor: default;
+  }
+  .btn-undo:disabled.is-working,
+  .btn-undo:disabled.is-done {
+    opacity: 1;
+  }
+  .btn-undo svg {
+    display: block;
+    transform-origin: 50% 50%;
+  }
+  .btn-undo .icon-done {
+    display: none;
+    flex-shrink: 0;
+  }
+  .btn-undo.is-done {
+    background: transparent;
+    border-color: transparent;
+    color: var(--am-ok);
+    pointer-events: none;
+  }
+  .btn-undo.is-done .icon-undo {
+    display: none;
+  }
+  .btn-undo.is-done .icon-done {
+    display: block;
+  }
+  .btn-undo.spinning .icon-undo {
+    animation: undoSpin 0.75s linear infinite;
+  }
+  .btn-about {
+    grid-column: 3;
+    grid-row: 2;
+    width: 100%;
+    padding: 7px 12px;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  /* About Popover Card */
+  .about-card {
+    display: none;
+    flex-direction: column;
+    gap: 8px;
+    padding: 11px 12px;
+    background: var(--am-card);
+    border: 1px solid var(--am-border);
+    border-radius: 12px;
+    font-size: 14px;
+    flex-shrink: 0;
+  }
+  .about-card.open {
+    display: flex;
+  }
+  .about-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .about-title {
+    font-weight: 600;
+    color: var(--am-fg);
+  }
+  .about-author {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--am-fg);
+  }
+  .about-compat {
+    font-size: 14px;
+    color: var(--am-muted);
+    text-align: center;
+  }
+  .about-links {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 2px;
+  }
+  .about-link {
+    flex: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 5px 10px;
+    border-radius: 8px;
+    border: 1px solid color-mix(in srgb, var(--am-fg) 18%, transparent);
+    background: color-mix(in srgb, var(--am-fg) 5%, var(--am-bg));
+    color: var(--am-fg);
+    font-size: 14px;
+    font-weight: 600;
+    text-decoration: none;
+    transition: background-color 0.15s, border-color 0.15s;
+  }
+  .about-link:hover {
+    background: color-mix(in srgb, var(--am-fg) 10%, var(--am-bg));
+    border-color: var(--am-border-active);
+  }
+  .about-link .heart {
+    color: var(--am-heart);
+  }
+
+  /* Lower Workspace (Notes & Search — standalone cards, zero nesting) */
+  .workspace-area {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    width: 100%;
+    gap: 10px;
+  }
+  .mode-panel {
+    display: none;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    gap: 10px;
+  }
+  .mode-panel.open {
+    display: flex;
+  }
+
+  /* Notes Scratchpad Card & Search Header Card */
+  .notes-card,
+  .search-card {
+    display: flex;
+    flex: 1 1 auto;
+    min-height: 150px;
+    flex-direction: column;
+    gap: 8px;
+    padding: 10px 12px 10px;
+    background: var(--am-card);
+    border: 1px solid var(--am-border);
+    border-radius: 12px;
+    transition: border-color 0.15s ease;
+  }
+  .notes-card.has-cards {
+    flex: 0 0 auto;
+    min-height: 0;
+  }
+  .search-card {
+    flex: 0 0 auto;
+    min-height: 0;
+  }
+  .notes-card:focus-within,
+  .search-card:focus-within {
+    border-color: var(--am-border-active);
+  }
+  .notes-head {
+    display: grid;
+    grid-template-columns: minmax(52px, 1fr) auto minmax(52px, 1fr);
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+    user-select: none;
+  }
+  .notes-actions-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+  }
+  .notes-actions-left {
+    grid-column: 1;
+    justify-self: start;
+  }
+  .notes-actions-right {
+    grid-column: 3;
+    justify-self: end;
+  }
+  .notes-action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
+    padding: 0;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--am-muted);
+    cursor: pointer;
+    transition: color 0.15s ease, background-color 0.15s ease, opacity 0.15s ease;
+  }
+  .notes-action:hover:not(:disabled) {
+    color: var(--am-fg);
+    background: color-mix(in srgb, var(--am-fg) 8%, transparent);
+  }
+  .notes-action:disabled:not(.is-checked) {
+    opacity: 0.32;
+    cursor: default;
+  }
+  .notes-action.confirm-ok:hover:not(:disabled) {
+    color: var(--am-ok);
+    background: color-mix(in srgb, var(--am-ok) 12%, transparent);
+  }
+  .notes-action.confirm-cancel:hover:not(:disabled) {
+    color: var(--am-crit);
+    background: color-mix(in srgb, var(--am-crit) 12%, transparent);
+  }
+  .notes-action svg {
+    display: block;
+  }
+  .notes-action .icon-check {
+    display: none;
+  }
+  .notes-action.is-checked {
+    color: var(--am-ok);
+    opacity: 1;
+  }
+  .notes-action.is-checked .icon-main {
+    display: none;
+  }
+  .notes-action.is-checked .icon-check {
+    display: block;
+  }
+  .del-confirm-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .del-confirm-btns {
+    display: none;
+    align-items: center;
+    gap: 2px;
+  }
+  .del-confirm-wrap.confirming .del-trash-btn {
+    display: none;
+  }
+  .del-confirm-wrap.confirming .del-confirm-btns {
+    display: inline-flex;
+  }
+
+  .mode-switch {
+    position: relative;
+    grid-column: 2;
+    justify-self: center;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    align-items: stretch;
+    height: 28px;
+    width: min(260px, max(132px, calc(100vw - 176px)));
+    padding: 2px;
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--am-fg) 5%, transparent);
+  }
+  .mode-thumb {
+    position: absolute;
+    top: 2px;
+    bottom: 2px;
+    left: 2px;
+    width: calc(50% - 2px);
+    border-radius: 6px;
+    border: 1px solid color-mix(in srgb, var(--am-fg) 18%, transparent);
+    background: var(--am-bg);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+    transition: transform 0.22s cubic-bezier(0.22, 1, 0.36, 1);
+    pointer-events: none;
+    z-index: 0;
+  }
+  .mode-switch.is-search .mode-thumb {
+    transform: translateX(100%);
+  }
+  .mode-switch.no-anim .mode-thumb {
+    transition: none;
+  }
+  .mode-tab {
+    position: relative;
+    z-index: 1;
+    min-width: 0;
+    height: 100%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 5px;
+    padding: 0 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--am-muted);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.2;
+    cursor: pointer;
+    transition: color 0.15s ease;
+  }
+  .mode-tab:hover:not(.active) {
+    color: var(--am-fg);
+  }
+  .mode-tab.active {
+    color: var(--am-fg);
+  }
+  .note-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--am-accent);
+    flex-shrink: 0;
+    display: none;
+  }
+  .note-dot.dirty {
+    display: inline-block;
+    animation: notePulse 1.4s ease-in-out infinite;
+  }
+  .note-dot.error {
+    display: inline-block;
+    background: var(--am-crit);
+    animation: notePulse 1.1s ease-in-out infinite;
+  }
+  @keyframes notePulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.35; transform: scale(0.8); }
+  }
+  .notes-input {
+    flex: 1 1 auto;
+    width: 100%;
+    min-height: 0;
+    padding: 0 4px 0 0;
+    border: none;
+    outline: none;
+    resize: none;
+    background: transparent;
+    color: var(--am-fg);
+    font-size: 15px;
+    font-weight: 400;
+    line-height: 1.45;
+    overflow-y: auto;
+  }
+  .notes-card.has-cards .notes-input {
+    flex: 0 0 auto;
+    min-height: 46px;
+  }
+  .notes-card.has-cards .notes-input.is-animating {
+    transition: height 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .notes-input::placeholder {
+    color: var(--am-muted);
+    opacity: 0.75;
+  }
+
+  /* Left Dot-Rail & Standalone Cards Stage */
+  .cards-stage {
+    display: none;
+    flex: 1 1 auto;
+    min-height: 110px;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .cards-stage.open {
+    display: flex;
+  }
+  .cards-dots {
+    display: none;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    width: 10px;
+    flex-shrink: 0;
+    padding: 6px 0;
+    user-select: none;
+  }
+  .cards-dots.visible {
+    display: flex;
+  }
+  .cards-dot {
+    width: 5px;
+    height: 5px;
+    padding: 0;
+    border: none;
+    border-radius: 50%;
+    background: color-mix(in srgb, var(--am-fg) 18%, transparent);
+    cursor: pointer;
+    transition: background-color 0.2s ease, transform 0.2s ease;
+  }
+  .cards-dot:hover {
+    background: color-mix(in srgb, var(--am-fg) 42%, transparent);
+    transform: scale(1.25);
+  }
+  .cards-dot.active {
+    background: color-mix(in srgb, var(--am-fg) 68%, transparent);
+    transform: scale(1.2);
+  }
+  .cards-viewport {
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    padding-bottom: 2px;
+    scrollbar-width: none;
+  }
+  .cards-viewport::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Standalone Note Card & Search Result Card */
+  .note-block,
+  .search-block {
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 9px 12px 10px;
+    background: var(--am-card);
+    border: 1px solid var(--am-border);
+    border-radius: 12px;
+    cursor: pointer;
+    transition: border-color 0.28s ease, background-color 0.22s ease;
+  }
+  .note-block:hover,
+  .search-block:hover {
+    border-color: color-mix(in srgb, var(--am-fg) 22%, transparent);
+  }
+  .note-block.expanded,
+  .search-block.expanded {
+    border-color: var(--am-border-active);
+    cursor: default;
+  }
+  .note-block.pinned {
+    border-color: color-mix(in srgb, var(--am-accent) 34%, var(--am-border));
+  }
+  .note-block.pinned:hover {
+    border-color: color-mix(in srgb, var(--am-accent) 52%, var(--am-border));
+  }
+  .block-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    min-height: 22px;
+    user-select: none;
+  }
+  .search-block .block-head {
+    justify-content: flex-start;
+  }
+  .block-meta {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    min-width: 0;
+    font-size: 12px;
+    color: var(--am-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .block-head > .notes-action,
+  .block-head > .del-confirm-wrap,
+  .block-head > .notes-actions-group .notes-action {
+    opacity: 0.58;
+    transition: opacity 0.15s ease, color 0.24s ease, background-color 0.18s ease;
+    flex-shrink: 0;
+  }
+  .note-block:hover .block-head > .notes-action,
+  .note-block:hover .block-head > .del-confirm-wrap,
+  .note-block:hover .block-head > .notes-actions-group .notes-action,
+  .note-block.expanded .block-head > .notes-action,
+  .note-block.expanded .block-head > .del-confirm-wrap,
+  .note-block.expanded .block-head > .notes-actions-group .notes-action,
+  .note-block.is-confirming .block-head > .notes-action,
+  .note-block.is-confirming .block-head > .del-confirm-wrap,
+  .note-block.is-confirming .block-head > .notes-actions-group .notes-action,
+  .search-block:hover .block-head > .notes-action,
+  .search-block.expanded .block-head > .notes-action {
+    opacity: 1;
+  }
+  .block-head > .notes-actions-group .notes-action.is-pinned {
+    opacity: 1;
+    color: var(--am-accent);
+  }
+  .block-head > .notes-actions-group .notes-action.is-pinned:hover:not(:disabled) {
+    color: var(--am-accent);
+    background: color-mix(in srgb, var(--am-accent) 12%, transparent);
+  }
+  .block-editor {
+    width: 100%;
+    padding: 0 4px 0 0;
+    border: none;
+    outline: none;
+    resize: none;
+    background: transparent;
+    color: var(--am-fg);
+    font-size: 15px;
+    font-weight: 400;
+    line-height: 1.45;
+    overflow-y: hidden;
+    cursor: pointer;
+  }
+  .block-editor.is-animating {
+    transition: height 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .note-block:not(.expanded) .block-editor.is-clipped {
+    -webkit-mask-image: linear-gradient(to bottom, #000 68%, rgba(0, 0, 0, 0.15) 100%);
+    mask-image: linear-gradient(to bottom, #000 68%, rgba(0, 0, 0, 0.15) 100%);
+  }
+  .note-block.expanded .block-editor {
+    cursor: text;
+    overflow-y: auto;
+  }
+
+  /* Search Controls & Result Blocks */
+  .search-count {
+    grid-column: 1;
+    justify-self: start;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--am-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+  .search-input-wrap {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 5px 4px 10px;
+    border-radius: 8px;
+    border: 1px solid var(--am-border);
+    background: var(--am-bg);
+    transition: border-color 0.15s ease;
+  }
+  .search-input-wrap:focus-within {
+    border-color: var(--am-border-active);
+  }
+  .search-input-icon {
+    color: var(--am-muted);
+    flex-shrink: 0;
+    display: block;
+  }
+  .search-input {
+    flex: 1 1 auto;
+    width: 100%;
+    min-width: 0;
+    padding: 2px 0;
+    border: none;
+    outline: none;
+    background: transparent;
+    color: var(--am-fg);
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.35;
+  }
+  .search-scope {
+    display: inline-flex;
+    align-items: center;
+    flex-shrink: 0;
+    padding: 2px;
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--am-fg) 6%, transparent);
+    user-select: none;
+  }
+  .scope-btn {
+    border: 1px solid transparent;
+    border-radius: 4px;
+    background: transparent;
+    color: var(--am-muted);
+    font-size: 11px;
+    font-weight: 600;
+    line-height: 1.1;
+    padding: 3px 6px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: color 0.15s ease, background-color 0.15s ease, border-color 0.15s ease;
+  }
+  .scope-btn:hover:not(.active) {
+    color: var(--am-fg);
+  }
+  .scope-btn.active {
+    color: var(--am-fg);
+    background: var(--am-bg);
+    border-color: color-mix(in srgb, var(--am-fg) 16%, transparent);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.06);
+  }
+  .search-chat-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--am-muted);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .search-chat-title.is-current {
+    color: var(--am-accent);
+  }
+  .search-input::placeholder {
+    color: var(--am-muted);
+    opacity: 0.75;
+  }
+  .search-role {
+    font-weight: 600;
+    font-size: 12px;
+    padding: 1px 6px;
+    border-radius: 5px;
+    background: color-mix(in srgb, var(--am-fg) 8%, transparent);
+    color: var(--am-fg);
+  }
+  .search-role.role-user {
+    color: var(--am-accent);
+    background: color-mix(in srgb, var(--am-accent) 12%, transparent);
+  }
+  .search-role.role-summary {
+    color: var(--am-warn1);
+    background: color-mix(in srgb, var(--am-warn1) 14%, transparent);
+  }
+  .search-archived {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--am-muted);
+    padding: 1px 5px;
+    border-radius: 4px;
+    border: 1px solid var(--am-border);
+  }
+  .search-body {
+    width: 100%;
+    padding-right: 4px;
+    font-size: 14px;
+    line-height: 1.45;
+    color: var(--am-fg);
+    white-space: pre-wrap;
+    word-break: break-word;
+    overflow-y: hidden;
+    transition: height 0.28s cubic-bezier(0.22, 1, 0.36, 1);
+  }
+  .search-block.expanded .search-body {
+    overflow-y: auto;
+    cursor: text;
+    user-select: text;
+  }
+  .search-body mark {
+    background: color-mix(in srgb, var(--am-warn1) 28%, transparent);
+    color: var(--am-fg);
+    border-radius: 3px;
+    padding: 0 2px;
+  }
+  .search-empty {
+    padding: 18px 12px;
+    text-align: center;
+    font-size: 13px;
+    color: var(--am-muted);
+    user-select: none;
+  }
+
+  /* Antigravity-style Context Menu */
+  .ctx-menu {
+    position: fixed;
+    z-index: 9999;
+    display: none;
+    flex-direction: column;
+    width: max-content;
+    padding: 4px;
+    border-radius: 10px;
+    border: 1px solid var(--am-border);
+    background: var(--am-bg);
+    box-shadow: 0 6px 20px rgba(0, 0, 0, 0.16), 0 1px 3px rgba(0, 0, 0, 0.08);
+    user-select: none;
+  }
+  .ctx-menu.open {
+    display: flex;
+  }
+  .ctx-item {
+    display: flex;
+    align-items: center;
+    width: 100%;
+    padding: 4px 8px;
+    border: none;
+    border-radius: 6px;
+    background: transparent;
+    color: var(--am-fg);
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.25;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+    transition: background-color 0.12s ease;
+  }
+  .ctx-item:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--am-fg) 8%, transparent);
+  }
+  .ctx-item:disabled {
+    color: var(--am-muted);
+    opacity: 0.55;
+    cursor: default;
+  }
+
+  /* Antigravity-style Pill Tooltip */
+  .am-tip {
+    position: fixed;
+    z-index: 9998;
+    left: 0;
+    top: 0;
+    max-width: calc(100vw - 16px);
+    padding: 5px 11px;
+    border-radius: 14px;
+    border: 1px solid color-mix(in srgb, var(--am-border) 88%, transparent);
+    background: var(--am-bg);
+    color: color-mix(in srgb, var(--am-fg) 84%, transparent);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 1.25;
+    letter-spacing: 0.005em;
+    box-shadow: 0 2px 6px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.04);
+    pointer-events: none;
+    user-select: none;
+    opacity: 0;
+    visibility: hidden;
+    word-break: break-word;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .am-tip {
+      background: color-mix(in srgb, var(--am-fg) 6%, var(--am-bg));
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28), 0 1px 2px rgba(0, 0, 0, 0.16);
+    }
+  }
+  html[data-theme="dark"] .am-tip {
+    background: color-mix(in srgb, var(--am-fg) 6%, var(--am-bg));
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.28), 0 1px 2px rgba(0, 0, 0, 0.16);
+  }
+  .am-tip.open {
+    opacity: 1;
+    visibility: visible;
+  }
+
+  @media (max-width: 255px) {
+    #t100,
+    #t300 {
+      display: none;
+    }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div id="main" class="main-stack">
+    <!-- Main Meter Card -->
+    <div class="card">
+      <div class="hero-top">
+        <div id="total" class="big-num">0</div>
+        <div id="delta" class="delta"></div>
+      </div>
+      <div class="unit">tokens in chat</div>
+
+      <div class="bar-wrap">
+        <div class="bar-track">
+          <div class="bar-fill-clip">
+            <div id="bar-fill" class="bar-fill"></div>
+          </div>
+          <div id="auto-pin" class="auto-pin"></div>
+        </div>
+        <div class="bar-ticks">
+          <span class="tick edge-left">0</span>
+          <span id="t100" class="tick" style="left:19.53%;">100</span>
+          <span id="t200" class="tick" style="left:39.06%;">200</span>
+          <span id="t300" class="tick" style="left:58.59%;">300</span>
+          <span id="t400" class="tick" style="left:78.12%;">400</span>
+          <span id="t512" class="tick edge-right">512K</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Info Card -->
+    <div class="card info-card">
+      <div class="dates-stack">
+        <div class="date-line"><span>First</span> <strong id="first-ts">—</strong></div>
+        <div class="date-line"><span>Last</span> <strong id="last-ts">—</strong></div>
+      </div>
+      <div class="info-divider"></div>
+      <div class="info-row">
+        <div class="info-item" id="msgs-wrap">Your messages <strong id="msgs">0</strong></div>
+        <div id="compact-state" class="compact-state">Not compacted</div>
+      </div>
+    </div>
+
+    <!-- Auto-compact & Manual Action Card -->
+    <div class="card ctrl-card">
+      <div class="toggle-group">
+        <label id="auto-switch" class="switch">
+          <input id="in-auto" type="checkbox">
+          <span class="slider"></span>
+        </label>
+        <label class="toggle-label" for="in-auto">Auto-compact</label>
+      </div>
+
+      <span class="limit-label">after</span>
+      <div id="in-at-wrap" class="input-wrap">
+        <input id="in-at" type="number" min="10" max="500" step="1" value="250">
+        <span>K</span>
+      </div>
+
+      <button id="compact-btn" class="btn btn-compact" type="button" disabled>Compact now</button>
+      <div class="undo-slot">
+        <button id="undo-compact-btn" class="btn btn-undo" type="button" data-tip="Undo last compaction" aria-label="Undo last compaction">
+          <svg class="icon-undo" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M5.11 17.79a9 9 0 1 0 6.89-14.79 9.75 9.75 0 0 0-6.74 2.74L3 8"/>
+            <path d="M3 3v5h5"/>
+          </svg>
+          <svg class="icon-done" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.85" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="10"/>
+            <path d="m16 9-5.5 5.5L8 12"/>
+          </svg>
+        </button>
+      </div>
+      <button id="about-btn" class="btn btn-about" type="button">About</button>
+    </div>
+
+    <!-- About Card -->
+    <div id="about-card" class="about-card">
+      <div class="about-head">
+        <span class="about-title">Antimetro v1.1.0</span>
+        <span class="about-author">by izomondo</span>
+      </div>
+      <div class="about-compat">Tested on Antigravity 2.34.0</div>
+      <div class="about-links">
+        <a class="about-link" href="https://github.com/izomondo/antimetro" target="_blank" rel="noopener noreferrer">
+          GitHub
+        </a>
+        <a class="about-link" href="https://izomondo.com/support" target="_blank" rel="noopener noreferrer">
+          <span class="heart">♥</span> Donate
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <!-- Lower Workspace: Notes & Chat Search -->
+  <div class="workspace-area">
+    <!-- Notes Mode -->
+    <div id="notes-panel" class="mode-panel open">
+      <div id="notes-card" class="notes-card">
+        <div class="notes-head">
+          <div class="notes-actions-group notes-actions-left">
+            <button id="notes-copy-btn" class="notes-action" type="button" data-tip="Copy current note" aria-label="Copy current note" disabled>
+              <svg class="icon-main" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect width="14" height="14" x="8" y="8" rx="2" ry="2"/>
+                <path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/>
+              </svg>
+              <svg class="icon-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M20 6 9 17l-5-5"/>
+              </svg>
+            </button>
+            <button id="notes-add-btn" class="notes-action" type="button" data-tip="Save as card below (Ctrl+Enter)" aria-label="Save as card below" disabled>
+              <svg class="icon-main" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect width="18" height="18" x="3" y="3" rx="2"/>
+                <path d="M8 12h8"/>
+                <path d="M12 8v8"/>
+              </svg>
+            </button>
+          </div>
+          <div class="mode-switch" role="tablist" aria-label="Workspace mode">
+            <span class="mode-thumb" aria-hidden="true"></span>
+            <button type="button" class="mode-tab active" data-mode="notes" role="tab" aria-selected="true">
+              <span id="note-dot" class="note-dot" aria-hidden="true"></span>
+              <span>Notes</span>
+            </button>
+            <button type="button" class="mode-tab" data-mode="search" role="tab" aria-selected="false">Search</button>
+          </div>
+          <div id="notes-clear-wrap" class="del-confirm-wrap notes-actions-right">
+            <button id="notes-clear-btn" class="notes-action del-trash-btn" type="button" data-tip="Clear current note" aria-label="Clear current note" disabled>
+              <svg class="icon-main" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M10 11v6"/>
+                <path d="M14 11v6"/>
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/>
+                <path d="M3 6h18"/>
+                <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+              </svg>
+              <svg class="icon-check" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M20 6 9 17l-5-5"/>
+              </svg>
+            </button>
+            <div class="del-confirm-btns">
+              <button id="notes-clear-ok" class="notes-action confirm-ok" type="button" data-tip="Confirm clear" aria-label="Confirm clear">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M20 6 9 17l-5-5"/>
+                </svg>
+              </button>
+              <button id="notes-clear-cancel" class="notes-action confirm-cancel" type="button" data-tip="Cancel" aria-label="Cancel">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M18 6 6 18"/>
+                  <path d="m6 6 12 12"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </div>
+        <textarea id="notes-input" class="notes-input" spellcheck="false" placeholder="Add notes for this chat…"></textarea>
+      </div>
+
+      <div id="notes-stage" class="cards-stage">
+        <div id="notes-dots" class="cards-dots" aria-hidden="true"></div>
+        <div id="notes-viewport" class="cards-viewport"></div>
+      </div>
+    </div>
+
+    <!-- Search Mode -->
+    <div id="search-panel" class="mode-panel">
+      <div id="search-card" class="search-card">
+        <div class="notes-head">
+          <span id="search-count" class="search-count"></span>
+          <div class="mode-switch is-search" role="tablist" aria-label="Workspace mode">
+            <span class="mode-thumb" aria-hidden="true"></span>
+            <button type="button" class="mode-tab" data-mode="notes" role="tab" aria-selected="false">Notes</button>
+            <button type="button" class="mode-tab active" data-mode="search" role="tab" aria-selected="true">Search</button>
+          </div>
+          <div class="notes-actions-group notes-actions-right">
+            <button id="search-clear-btn" class="notes-action" type="button" data-tip="Clear search" aria-label="Clear search" disabled>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M18 6 6 18"/>
+                <path d="m6 6 12 12"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <div class="search-input-wrap">
+          <svg class="search-input-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="8"/>
+            <path d="m21 21-4.3-4.3"/>
+          </svg>
+          <input id="search-input" class="search-input" type="text" spellcheck="false" placeholder="Search messages in this chat…">
+          <div class="search-scope" role="group" aria-label="Search scope">
+            <button type="button" class="scope-btn active" data-scope="this" aria-pressed="true" data-tip="Search only this chat">This</button>
+            <button type="button" class="scope-btn" data-scope="all" aria-pressed="false" data-tip="Search all chats">All</button>
+          </div>
+        </div>
+      </div>
+
+      <div id="search-stage" class="cards-stage open">
+        <div id="search-dots" class="cards-dots" aria-hidden="true"></div>
+        <div id="search-viewport" class="cards-viewport">
+          <div class="search-empty">Search prompts, replies, and compacted summaries</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="ctx-menu" class="ctx-menu" role="menu">
+  <button type="button" class="ctx-item" data-act="cut">Cut</button>
+  <button type="button" class="ctx-item" data-act="copy">Copy</button>
+  <button type="button" class="ctx-item" data-act="paste">Paste</button>
+  <button type="button" class="ctx-item" data-act="selectAll">Select All</button>
+</div>
+<div id="am-tip" class="am-tip" role="tooltip" aria-hidden="true"></div>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const params = new URLSearchParams(location.search);
+  const SCALE_MAX = 512000;
+  const MAX_NOTE_CARDS = 200;
+  const DRAFT_KEY = "__draft__";
+  const MONTHS = [
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December"
+  ];
+
+  const state = {
+    etag: "",
+    timer: null,
+    pollGen: 0,
+    settingsLoadedForConv: null,
+    settingsDirty: false,
+    settingsSaving: false,
+    settings: {
+      auto_compact_enabled: false,
+      auto_compact_threshold: 250000,
+    },
+    lastData: null,
+    hadNetError: false,
+    convTracked: "",
+    baselineStep: null,
+    firedForStep: -1,
+    firedForCheckpoint: -1,
+    autoTimer: null,
+    btnTimer: null,
+    compactPending: false,
+    compactPendingTimer: null,
+    compactingActive: false,
+    workDotsTimer: null,
+    undoInFlight: false,
+    undoDone: false,
+    undoDoneTimer: null,
+    nativeDoneBlobUrl: null,
+    nativeDoneAudio: null,
+    nativeDonePreload: null,
+    keepAboutUntil: 0,
+    autoBoostTimer: null,
+    autoFadeTimer: null,
+    notes: {
+      conv: null,
+      mode: "notes",
+      draft: "",
+      cards: [],
+      nextId: 1,
+      dirty: false,
+      saveError: "",
+      seq: 0,
+      savedSeq: 0,
+      timer: null,
+      loadingConv: "",
+      expandedCardId: null,
+      topExpanded: false,
+      topCollapsedH: 46,
+    },
+    search: {
+      conv: "",
+      scope: "this",
+      lastScope: "this",
+      query: "",
+      results: [],
+      total: 0,
+      timer: null,
+      seq: 0,
+      aborter: null,
+    },
+    anim: {
+      conv: "",
+      rafId: 0,
+      startTime: 0,
+      duration: 850,
+      fromTokens: 0,
+      toTokens: 0,
+      curTokens: 0,
+      fromDelta: 0,
+      toDelta: 0,
+      curDelta: 0,
+      hasDelta: false,
+    },
+  };
+
+  function parseColorRgb(str) {
+    if (!str) return null;
+    const hexMatch = str.trim().match(/^#([0-9a-f]{3}|[0-9a-f]{6})$/i);
+    if (hexMatch) {
+      let hex = hexMatch[1];
+      if (hex.length === 3) {
+        hex = hex[0] + hex[0] + hex[1] + hex[1] + hex[2] + hex[2];
+      }
+      return [
+        parseInt(hex.slice(0, 2), 16),
+        parseInt(hex.slice(2, 4), 16),
+        parseInt(hex.slice(4, 6), 16),
+      ];
+    }
+    const rgbMatch = str.match(/rgba?\(\s*(\d+)[\s,]+(\d+)[\s,]+(\d+)/i);
+    if (rgbMatch) {
+      return [
+        parseInt(rgbMatch[1], 10),
+        parseInt(rgbMatch[2], 10),
+        parseInt(rgbMatch[3], 10),
+      ];
+    }
+    return null;
+  }
+
+  function detectAndApplyTheme(payload) {
+    if (payload && typeof payload.themeType === "string") {
+      const t = payload.themeType.toLowerCase();
+      if (t.includes("light")) {
+        document.documentElement.setAttribute("data-theme", "light");
+        return;
+      }
+      if (t.includes("dark")) {
+        document.documentElement.setAttribute("data-theme", "dark");
+        return;
+      }
+    }
+    const rawBg = getComputedStyle(document.documentElement).getPropertyValue("--background").trim();
+    const rgb = parseColorRgb(rawBg) || parseColorRgb(getComputedStyle(document.body).backgroundColor);
+    if (rgb) {
+      const lum = (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255;
+      document.documentElement.setAttribute("data-theme", lum > 0.55 ? "light" : "dark");
+    }
+  }
+
+  window.addEventListener("message", (ev) => {
+    if (ev.data && ev.data.type === "theme-change") {
+      setTimeout(() => detectAndApplyTheme(ev.data.payload), 20);
+    }
+  });
+  setTimeout(() => detectAndApplyTheme(null), 50);
+
+  function setAboutOpen(open) {
+    $("about-card").classList.toggle("open", Boolean(open));
+    $("about-btn").classList.toggle("active", Boolean(open));
+  }
+
+  function selectionInsideAbout() {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+    return $("about-card").contains(sel.getRangeAt(0).commonAncestorContainer);
+  }
+
+  $("about-btn").addEventListener("click", () => {
+    setAboutOpen(!$("about-card").classList.contains("open"));
+  });
+
+  document.addEventListener("pointerdown", (e) => {
+    if (!$("about-card").classList.contains("open")) return;
+    if (e.target.closest("#about-btn")) return;
+    if (e.target.closest("#about-card")) {
+      if (e.target.closest(".about-link")) {
+        state.keepAboutUntil = Date.now() + 1500;
+      }
+      return;
+    }
+    setAboutOpen(false);
+  }, true);
+
+  document.addEventListener("keydown", (e) => {
+    if (!$("about-card").classList.contains("open")) return;
+    if (["Shift", "Control", "Alt", "Meta", "AltGraph"].includes(e.key)) return;
+    if (e.target && e.target.closest && e.target.closest("#about-btn") && (e.key === "Enter" || e.key === " ")) {
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && e.code === "KeyC" && selectionInsideAbout()) {
+      return;
+    }
+    if (e.target && e.target.closest && e.target.closest("#about-card")) {
+      if (e.target.closest(".about-link") && e.key === "Enter") {
+        state.keepAboutUntil = Date.now() + 1500;
+      }
+      return;
+    }
+    setAboutOpen(false);
+  }, true);
+
+  const currentConv = () =>
+    (window.sidecar && window.sidecar.conversationId) ||
+    params.get("conversationId") ||
+    "";
+
+  const convKey = (conv) => conv || DRAFT_KEY;
+
+  const apiFetch = (url, options = {}) => {
+    if (window.sidecar && typeof window.sidecar.fetch === "function") {
+      return window.sidecar.fetch(url, options);
+    }
+    const headers = new Headers(options.headers || {});
+    if (options.method && options.method !== "GET") {
+      headers.set("Content-Type", "application/json");
+    }
+    const tok = params.get("token");
+    if (tok) {
+      headers.set("X-Sidecar-Token", tok);
+    }
+    return fetch(url, { ...options, headers });
+  };
+
+  /* Antigravity-style Pill Tooltip */
+  const tipState = {
+    target: null,
+    timer: null,
+    lastHiddenAt: 0,
+  };
+
+  function isTipOverflowHidden(el) {
+    return el.getAttribute("data-tip-overflow") === "1" && el.scrollWidth <= el.clientWidth + 1;
+  }
+
+  function positionTip(target) {
+    const tip = $("am-tip");
+    if (!tip || !target || !target.isConnected) return;
+    const r = target.getBoundingClientRect();
+    const tw = tip.offsetWidth;
+    const th = tip.offsetHeight;
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    const gap = 7;
+
+    let left = r.left + r.width / 2 - tw / 2;
+    left = Math.max(8, Math.min(left, vw - tw - 8));
+
+    let top = r.bottom + gap;
+    if (top + th > vh - 8 && r.top - gap - th >= 8) {
+      top = r.top - th - gap;
+    } else {
+      top = Math.max(8, Math.min(top, vh - th - 8));
+    }
+
+    tip.style.left = Math.round(left) + "px";
+    tip.style.top = Math.round(top) + "px";
+  }
+
+  function hideTip(immediate) {
+    if (tipState.timer) {
+      clearTimeout(tipState.timer);
+      tipState.timer = null;
+    }
+    const tip = $("am-tip");
+    if (tip && tip.classList.contains("open")) {
+      tipState.lastHiddenAt = Date.now();
+      tip.classList.remove("open");
+      tip.setAttribute("aria-hidden", "true");
+    }
+    if (immediate) {
+      tipState.target = null;
+    }
+  }
+
+  function showTipFor(target) {
+    if (!target || !target.isConnected || target.disabled) return;
+    if ($("ctx-menu").classList.contains("open")) return;
+    const text = target.getAttribute("data-tip");
+    if (!text || isTipOverflowHidden(target)) return;
+    const tip = $("am-tip");
+    if (!tip) return;
+    tip.textContent = text;
+    positionTip(target);
+    tip.setAttribute("aria-hidden", "false");
+    tip.classList.add("open");
+  }
+
+  function setTip(el, text) {
+    if (!el) return;
+    const val = text ? String(text) : "";
+    if (val) {
+      el.setAttribute("data-tip", val);
+    } else {
+      el.removeAttribute("data-tip");
+    }
+    if (tipState.target === el) {
+      if (!val || isTipOverflowHidden(el)) {
+        hideTip(true);
+      } else if ($("am-tip").classList.contains("open")) {
+        $("am-tip").textContent = val;
+        positionTip(el);
+      }
+    }
+  }
+
+  document.addEventListener("pointerover", (e) => {
+    const el = e.target && e.target.closest ? e.target.closest("[data-tip]") : null;
+    if (el === tipState.target) return;
+    hideTip(true);
+    if (!el || el.disabled) return;
+    const text = el.getAttribute("data-tip");
+    if (!text || isTipOverflowHidden(el)) return;
+    tipState.target = el;
+    const delay = (Date.now() - tipState.lastHiddenAt) < 220 ? 140 : 420;
+    tipState.timer = setTimeout(() => {
+      tipState.timer = null;
+      if (tipState.target === el) {
+        showTipFor(el);
+      }
+    }, delay);
+  });
+
+  document.addEventListener("pointerout", (e) => {
+    if (!tipState.target) return;
+    if (e.relatedTarget && tipState.target.contains(e.relatedTarget)) return;
+    hideTip(true);
+  });
+
+  document.addEventListener("pointerdown", () => hideTip(true), true);
+  document.addEventListener("keydown", () => hideTip(true), true);
+  window.addEventListener("scroll", () => hideTip(true), true);
+
+  function fmt(n) {
+    return Math.round(n || 0).toString().replace(/\B(?=(\d{3})+(?!\d))/g, "\u00A0");
+  }
+
+  function fmtDateTime(iso) {
+    if (!iso) return "—";
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    const dd = d.getDate();
+    const mon = MONTHS[d.getMonth()];
+    const yyyy = d.getFullYear();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    return dd + " " + mon + " " + yyyy + ", " + hh + ":" + mm;
+  }
+
+  function isCompactBlocked() {
+    const d = state.lastData;
+    if (!d || d.status !== "ok") return true;
+    if (
+      d.is_busy ||
+      d.just_compressed ||
+      d.compact_in_flight ||
+      state.compactPending ||
+      state.compactingActive
+    ) {
+      return true;
+    }
+    return false;
+  }
+
+  function clearCompactPending() {
+    state.compactPending = false;
+    if (state.compactPendingTimer) {
+      clearTimeout(state.compactPendingTimer);
+      state.compactPendingTimer = null;
+    }
+  }
+
+  function armCompactPending() {
+    clearCompactPending();
+    state.compactPending = true;
+    state.compactPendingTimer = setTimeout(() => {
+      state.compactPendingTimer = null;
+      state.compactPending = false;
+      if (!state.lastData || !state.lastData.compact_in_flight) {
+        stopWorkingCompactBtn();
+      }
+      refreshCompactBtnDisabled();
+    }, 10000);
+  }
+
+  function stopWorkingDots() {
+    if (state.workDotsTimer) {
+      clearInterval(state.workDotsTimer);
+      state.workDotsTimer = null;
+    }
+  }
+
+  function syncBarFlow(isBusy, isCompacting) {
+    const bar = $("bar-fill");
+    const compactNow = Boolean(isCompacting);
+    bar.classList.toggle("thinking", Boolean(isBusy || compactNow));
+    bar.classList.toggle("compacting", compactNow);
+  }
+
+  function startWorkingCompactBtn() {
+    if (state.btnTimer) {
+      clearTimeout(state.btnTimer);
+      state.btnTimer = null;
+    }
+    state.compactingActive = true;
+    syncBarFlow(state.lastData && state.lastData.is_busy, true);
+    const btn = $("compact-btn");
+    btn.className = "btn btn-compact is-working";
+    btn.disabled = true;
+    setTip(btn, "");
+    if (!btn.querySelector(".working-dots")) {
+      btn.innerHTML = '<span class="working-wrap">Working<span class="working-dots"></span></span>';
+    }
+    if (!state.workDotsTimer) {
+      let step = 0;
+      const frames = ["", ".", "..", "..."];
+      const dotsEl = btn.querySelector(".working-dots");
+      if (dotsEl) dotsEl.textContent = frames[step];
+      state.workDotsTimer = setInterval(() => {
+        step = (step + 1) % frames.length;
+        const el = $("compact-btn").querySelector(".working-dots");
+        if (el) el.textContent = frames[step];
+      }, 360);
+    }
+  }
+
+  function stopWorkingCompactBtn() {
+    state.compactingActive = false;
+    stopWorkingDots();
+    syncBarFlow(
+      state.lastData && state.lastData.is_busy,
+      state.lastData && state.lastData.compact_in_flight
+    );
+  }
+
+  function refreshCompactBtnDisabled() {
+    if (state.compactingActive || state.btnTimer) return;
+    $("compact-btn").disabled = isCompactBlocked();
+  }
+
+  function setCompactBtnStatus(text, cls, restoreMs, tooltip, forceDisabled) {
+    if (state.btnTimer) {
+      clearTimeout(state.btnTimer);
+      state.btnTimer = null;
+    }
+    stopWorkingDots();
+    const btn = $("compact-btn");
+    if (!text) {
+      btn.textContent = "Compact now";
+      btn.className = "btn btn-compact";
+      btn.disabled = forceDisabled !== undefined ? Boolean(forceDisabled) : isCompactBlocked();
+      setTip(btn, "");
+      return;
+    }
+    btn.textContent = text;
+    btn.className = "btn btn-compact" + (cls ? " " + cls : "");
+    btn.disabled = forceDisabled !== undefined ? Boolean(forceDisabled) : isCompactBlocked();
+    setTip(btn, tooltip || "");
+    if (restoreMs) {
+      state.btnTimer = setTimeout(() => {
+        state.btnTimer = null;
+        if (!state.compactingActive) {
+          setCompactBtnStatus();
+        }
+      }, restoreMs);
+    }
+  }
+
+  function updateAutoPin(instant) {
+    const pin = $("auto-pin");
+    const pct = Math.min(100, Math.max(0, (state.settings.auto_compact_threshold / SCALE_MAX) * 100));
+    if (instant) {
+      pin.style.transition = "none";
+      pin.style.left = pct.toFixed(2) + "%";
+      pin.classList.toggle("visible", Boolean(state.settings.auto_compact_enabled));
+      void pin.offsetWidth;
+      pin.style.transition = "";
+      return;
+    }
+    pin.style.left = pct.toFixed(2) + "%";
+    pin.classList.toggle("visible", Boolean(state.settings.auto_compact_enabled));
+  }
+
+  function cancelPendingAuto() {
+    if (state.autoTimer) {
+      clearTimeout(state.autoTimer);
+      state.autoTimer = null;
+    }
+  }
+
+  function syncThresholdWidth() {
+    const input = $("in-at");
+    const len = String(input.value || "").replace(/\D/g, "").length;
+    input.style.width = Math.max(2, Math.min(3, len || 3)) + "ch";
+  }
+
+  function normalizedThresholdInput() {
+    let kVal = parseInt($("in-at").value, 10);
+    if (isNaN(kVal)) kVal = Math.round((state.settings.auto_compact_threshold || 250000) / 1000) || 250;
+    return Math.min(500, Math.max(10, kVal));
+  }
+
+  function hasPendingSettingsChange() {
+    if (state.settingsDirty) return true;
+    const enabled = $("in-auto").checked;
+    const threshold = normalizedThresholdInput() * 1000;
+    return (
+      enabled !== Boolean(state.settings.auto_compact_enabled) ||
+      threshold !== Number(state.settings.auto_compact_threshold)
+    );
+  }
+
+  async function saveAutoSettings(targetConv) {
+    const conv = targetConv !== undefined ? targetConv : currentConv();
+    const kVal = normalizedThresholdInput();
+    $("in-at").value = kVal;
+    syncThresholdWidth();
+    state.settingsDirty = false;
+
+    const enabled = $("in-auto").checked;
+    const threshold = kVal * 1000;
+
+    state.settings.auto_compact_enabled = enabled;
+    state.settings.auto_compact_threshold = threshold;
+    updateAutoPin(false);
+
+    state.settingsSaving = true;
+    try {
+      const res = await apiFetch("/api/settings", {
+        method: "POST",
+        body: JSON.stringify({
+          conversationId: conv,
+          auto_compact_enabled: enabled,
+          auto_compact_threshold: threshold,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || data.error) {
+        setCompactBtnStatus("Save failed", "is-err", 3000, data.error || "Failed to save");
+        return;
+      }
+      if (currentConv() === conv) {
+        state.settings = data.settings;
+        state.firedForStep = -1;
+        state.firedForCheckpoint = -1;
+        cancelPendingAuto();
+        updateAutoPin(false);
+      }
+    } catch (e) {
+      setCompactBtnStatus("Save failed", "is-err", 3000, "Connection lost");
+    } finally {
+      state.settingsSaving = false;
+    }
+  }
+
+  function commitSettingsIfNeeded() {
+    if (hasPendingSettingsChange()) {
+      saveAutoSettings();
+    }
+  }
+
+  function triggerAutoSwitchHighlight(enabled) {
+    if (state.autoBoostTimer) {
+      clearTimeout(state.autoBoostTimer);
+      state.autoBoostTimer = null;
+    }
+    if (state.autoFadeTimer) {
+      clearTimeout(state.autoFadeTimer);
+      state.autoFadeTimer = null;
+    }
+    const sw = $("auto-switch");
+    sw.classList.remove("auto-boost", "auto-fade");
+    if (!enabled) return;
+
+    sw.classList.add("auto-boost");
+    state.autoBoostTimer = setTimeout(() => {
+      state.autoBoostTimer = null;
+      sw.classList.add("auto-fade");
+      void sw.offsetWidth;
+      sw.classList.remove("auto-boost");
+      state.autoFadeTimer = setTimeout(() => {
+        state.autoFadeTimer = null;
+        sw.classList.remove("auto-fade");
+      }, 1550);
+    }, 200);
+  }
+
+  $("in-at-wrap").addEventListener("mousedown", (e) => {
+    if (e.target !== $("in-at")) {
+      e.preventDefault();
+      $("in-at").focus();
+    }
+  });
+  $("in-auto").addEventListener("change", () => {
+    triggerAutoSwitchHighlight($("in-auto").checked);
+    saveAutoSettings();
+  });
+  $("in-at").addEventListener("input", () => {
+    state.settingsDirty = true;
+    syncThresholdWidth();
+  });
+  $("in-at").addEventListener("change", () => saveAutoSettings());
+  $("in-at").addEventListener("blur", commitSettingsIfNeeded);
+  $("in-at").addEventListener("keydown", (e) => {
+    if (e.key === "ArrowUp" || e.key === "ArrowDown") {
+      e.preventDefault();
+      const cur = normalizedThresholdInput();
+      const next = e.key === "ArrowUp"
+        ? Math.min(500, cur % 10 === 0 ? cur + 10 : Math.ceil(cur / 10) * 10)
+        : Math.max(10, cur % 10 === 0 ? cur - 10 : Math.floor(cur / 10) * 10);
+      $("in-at").value = next;
+      state.settingsDirty = true;
+      syncThresholdWidth();
+      return;
+    }
+    if (e.key === "Enter") {
+      commitSettingsIfNeeded();
+      e.target.blur();
+    }
+  });
+
+  $("compact-btn").addEventListener("click", async () => {
+    const conv = currentConv();
+    if (!conv || isCompactBlocked()) return;
+    cancelPendingAuto();
+    armCompactPending();
+    startWorkingCompactBtn();
+    const res = await sendCompact(conv);
+    if (!res.ok) {
+      clearCompactPending();
+      stopWorkingCompactBtn();
+      setCompactBtnStatus("Compact failed", "is-err", 3500, res.error || "Compact failed");
+    }
+  });
+
+  function preloadNativeDoneSound() {
+    if (state.nativeDoneBlobUrl) return Promise.resolve(state.nativeDoneBlobUrl);
+    if (state.nativeDonePreload) return state.nativeDonePreload;
+    state.nativeDonePreload = (async () => {
+      try {
+        const res = await apiFetch("/api/cascade-done.mp3", { method: "GET" });
+        if (!res.ok) return null;
+        const blob = await res.blob();
+        const url = URL.createObjectURL(blob);
+        state.nativeDoneBlobUrl = url;
+        const audio = new Audio(url);
+        audio.preload = "auto";
+        audio.load();
+        state.nativeDoneAudio = audio;
+        return url;
+      } catch (_) {
+        return null;
+      } finally {
+        state.nativeDonePreload = null;
+      }
+    })();
+    return state.nativeDonePreload;
+  }
+
+  async function playNativeDoneSound(volumePct) {
+    try {
+      const url = await preloadNativeDoneSound();
+      if (!url) return;
+      const audio = state.nativeDoneAudio || new Audio(url);
+      state.nativeDoneAudio = audio;
+      const vol = Number.isFinite(Number(volumePct)) ? Number(volumePct) : 100;
+      audio.volume = Math.max(0, Math.min(1, vol / 100));
+      audio.currentTime = 0;
+      await audio.play();
+    } catch (_) {
+    }
+  }
+
+  function clearUndoDone() {
+    if (state.undoDoneTimer) {
+      clearTimeout(state.undoDoneTimer);
+      state.undoDoneTimer = null;
+    }
+    state.undoDone = false;
+    $("undo-compact-btn").classList.remove("is-done");
+  }
+
+  function showUndoDone() {
+    clearUndoDone();
+    const btn = $("undo-compact-btn");
+    state.undoDone = true;
+    btn.disabled = true;
+    btn.classList.remove("spinning", "is-working", "is-err");
+    btn.classList.add("visible", "is-done");
+    setTip(btn, "");
+    state.undoDoneTimer = setTimeout(() => {
+      state.undoDoneTimer = null;
+      state.undoDone = false;
+      btn.classList.remove("is-done");
+      btn.disabled = false;
+      setTip(btn, "Undo last compaction");
+      const d = state.lastData;
+      const canUndo = Boolean(
+        d &&
+        d.status === "ok" &&
+        d.undo_step_index !== null &&
+        d.undo_step_index !== undefined &&
+        !d.is_busy &&
+        !d.compact_in_flight
+      );
+      btn.classList.toggle("visible", canUndo);
+    }, 2000);
+  }
+
+  $("undo-compact-btn").addEventListener("click", async () => {
+    const conv = currentConv();
+    const btn = $("undo-compact-btn");
+    if (!conv || btn.disabled) return;
+    preloadNativeDoneSound();
+    clearUndoDone();
+    state.undoInFlight = true;
+    btn.disabled = true;
+    btn.classList.remove("is-err");
+    btn.classList.add("is-working", "spinning");
+    try {
+      const res = await apiFetch("/api/undo-compact", {
+        method: "POST",
+        body: JSON.stringify({ conversationId: conv }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        state.undoInFlight = false;
+        btn.classList.remove("is-working", "spinning");
+        btn.classList.add("is-err");
+        setTip(btn, data.error || "Undo failed");
+        btn.disabled = false;
+        setTimeout(() => {
+          btn.classList.remove("is-err");
+          setTip(btn, "Undo last compaction");
+        }, 3000);
+        return;
+      }
+      state.etag = "";
+      state.firedForStep = -1;
+      state.firedForCheckpoint = -1;
+      cancelPendingAuto();
+      await poll();
+      if (state.lastData && typeof state.lastData.step_index === "number") {
+        state.baselineStep = state.lastData.step_index;
+      }
+      state.undoInFlight = false;
+      if (state.btnTimer) {
+        setCompactBtnStatus();
+      }
+      showUndoDone();
+      if (data.play_sound) {
+        playNativeDoneSound(data.sound_volume);
+      }
+    } catch (e) {
+      state.undoInFlight = false;
+      btn.classList.remove("is-working", "spinning");
+      btn.classList.add("is-err");
+      setTip(btn, "Connection lost");
+      btn.disabled = false;
+      setTimeout(() => {
+        btn.classList.remove("is-err");
+        setTip(btn, "Undo last compaction");
+      }, 3000);
+    }
+  });
+
+  async function sendCompact(conv) {
+    try {
+      const res = await apiFetch("/api/compact", {
+        method: "POST",
+        body: JSON.stringify({ conversationId: conv }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.ok) {
+        return { ok: false, error: data.error || ("HTTP " + res.status) };
+      }
+      return { ok: true };
+    } catch (e) {
+      return { ok: false, error: String(e) };
+    }
+  }
+
+  function scheduleAutoCompact(conv, stepIndex, checkpointStep) {
+    if (state.autoTimer) return;
+    state.autoTimer = setTimeout(async () => {
+      state.autoTimer = null;
+      if (currentConv() !== conv || !state.settings.auto_compact_enabled) return;
+      state.firedForStep = stepIndex;
+      state.firedForCheckpoint = checkpointStep;
+      armCompactPending();
+      startWorkingCompactBtn();
+      const res = await sendCompact(conv);
+      if (!res.ok) {
+        state.firedForStep = -1;
+        state.firedForCheckpoint = -1;
+        clearCompactPending();
+        stopWorkingCompactBtn();
+        setCompactBtnStatus("Compact failed", "is-err", 3500, res.error || "Auto-compact failed");
+      }
+    }, 1000);
+  }
+
+  function evaluateAutoCompact(d) {
+    const conv = currentConv();
+    if (!conv || d.status !== "ok") {
+      cancelPendingAuto();
+      return;
+    }
+
+    if (state.convTracked !== conv) {
+      state.convTracked = conv;
+      state.baselineStep = d.step_index;
+      state.firedForStep = -1;
+      state.firedForCheckpoint = -1;
+      cancelPendingAuto();
+      clearCompactPending();
+      stopWorkingCompactBtn();
+      setCompactBtnStatus();
+      return;
+    }
+
+    if (d.is_busy || d.just_compressed || !d.turn_finished) {
+      cancelPendingAuto();
+      return;
+    }
+
+    if (!state.settings.auto_compact_enabled) {
+      cancelPendingAuto();
+      return;
+    }
+
+    const cp = d.last_checkpoint_step || 0;
+    const isFreshReply = state.baselineStep !== null && d.step_index > state.baselineStep;
+    const aboveLimit = (d.context_tokens || 0) >= state.settings.auto_compact_threshold;
+    const notFiredYet =
+      state.firedForStep !== d.step_index &&
+      (cp === 0 || state.firedForCheckpoint !== cp);
+
+    if (isFreshReply && aboveLimit && notFiredYet) {
+      scheduleAutoCompact(conv, d.step_index, cp);
+    }
+  }
+
+  function easeInOutCubic(t) {
+    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  }
+
+  function zoneColor(tokens) {
+    if (tokens >= 300000) return "var(--am-crit)";
+    if (tokens >= 200000) return "var(--am-warn1)";
+    return "var(--am-ok)";
+  }
+
+  function paintMeter(tokensVal, deltaVal, hasDelta) {
+    const roundedTokens = Math.max(0, Math.round(tokensVal));
+    const color = zoneColor(roundedTokens);
+
+    $("total").textContent = fmt(roundedTokens);
+
+    const deltaEl = $("delta");
+    if (hasDelta) {
+      const roundedDelta = Math.round(deltaVal);
+      const sign = roundedDelta > 0 ? "+" : (roundedDelta < 0 ? "-" : "");
+      deltaEl.textContent = sign + fmt(Math.abs(roundedDelta)) + " / session";
+      deltaEl.style.color = color;
+    } else {
+      deltaEl.textContent = "";
+    }
+
+    const pct = Math.min(100, Math.max(0, (tokensVal / SCALE_MAX) * 100));
+    $("bar-fill").style.width = pct.toFixed(2) + "%";
+    $("bar-fill").style.background = color;
+
+    $("t100").className = "tick" + (roundedTokens >= 100000 ? " hit" : "");
+    $("t200").className = "tick" + (roundedTokens >= 200000 ? " hit" : "");
+    $("t300").className = "tick" + (roundedTokens >= 300000 ? " hit" : "");
+    $("t400").className = "tick" + (roundedTokens >= 400000 ? " hit" : "");
+    $("t512").className = "tick edge-right" + (roundedTokens >= 512000 ? " hit" : "");
+  }
+
+  function stopMeterAnim() {
+    if (state.anim.rafId) {
+      cancelAnimationFrame(state.anim.rafId);
+      state.anim.rafId = 0;
+    }
+  }
+
+  function animateMeterTo(conv, targetTokens, targetDelta, hasDelta) {
+    const a = state.anim;
+    const isNewConv = a.conv !== conv;
+    const isZeroReset = hasDelta && targetDelta === 0 && a.toDelta !== 0;
+
+    if (isNewConv) {
+      stopMeterAnim();
+      a.conv = conv;
+      a.fromTokens = targetTokens;
+      a.toTokens = targetTokens;
+      a.curTokens = targetTokens;
+      a.fromDelta = targetDelta;
+      a.toDelta = targetDelta;
+      a.curDelta = targetDelta;
+      a.hasDelta = hasDelta;
+      paintMeter(targetTokens, targetDelta, hasDelta);
+      return;
+    }
+
+    if (a.toTokens === targetTokens && a.toDelta === targetDelta && a.hasDelta === hasDelta) {
+      return;
+    }
+
+    stopMeterAnim();
+    a.fromTokens = a.curTokens;
+    a.toTokens = targetTokens;
+    a.hasDelta = hasDelta;
+
+    if (isZeroReset || !hasDelta) {
+      a.fromDelta = targetDelta;
+      a.toDelta = targetDelta;
+      a.curDelta = targetDelta;
+    } else {
+      a.fromDelta = a.curDelta;
+      a.toDelta = targetDelta;
+    }
+
+    if (a.fromTokens === a.toTokens && a.fromDelta === a.toDelta) {
+      paintMeter(a.toTokens, a.toDelta, a.hasDelta);
+      return;
+    }
+
+    a.startTime = performance.now();
+    const tick = (now) => {
+      const rawT = Math.min(1, (now - a.startTime) / a.duration);
+      const eased = easeInOutCubic(rawT);
+      a.curTokens = a.fromTokens + (a.toTokens - a.fromTokens) * eased;
+      a.curDelta = a.fromDelta + (a.toDelta - a.fromDelta) * eased;
+      paintMeter(a.curTokens, a.curDelta, a.hasDelta);
+      if (rawT < 1) {
+        a.rafId = requestAnimationFrame(tick);
+      } else {
+        a.rafId = 0;
+        a.curTokens = a.toTokens;
+        a.curDelta = a.toDelta;
+        paintMeter(a.toTokens, a.toDelta, a.hasDelta);
+      }
+    };
+    a.rafId = requestAnimationFrame(tick);
+  }
+
+  const NOTES_COLLAPSED_PX = 109; // ~5 lines at 15px / 1.45 line-height
+  const SEARCH_COLLAPSED_PX = 102; // ~5 lines at 14px / 1.45 line-height
+
+  const ICON_COPY = '<svg class="icon-main" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></svg><svg class="icon-check" width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+  const ICON_PIN = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></svg>';
+  const ICON_TRASH = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 11v6"/><path d="M14 11v6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M3 6h18"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+  const ICON_CHECK = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.25" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 6 9 17l-5-5"/></svg>';
+  const ICON_X = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 6 6 18"/><path d="m6 6 12 12"/></svg>';
+
+  function maxExpandedHeightPx() {
+    return Math.max(190, Math.floor(window.innerHeight * 0.56));
+  }
+
+  function setNoteDot(dirty, errMsg) {
+    const dot = $("note-dot");
+    const errText = errMsg || "";
+    state.notes.saveError = errText;
+    dot.classList.toggle("error", Boolean(errText));
+    dot.classList.toggle("dirty", Boolean(dirty) && !errText);
+    const notesTab = dot.closest(".mode-tab");
+    if (notesTab) {
+      setTip(notesTab, errText);
+    }
+  }
+
+  async function copyPlainText(text, fallbackInput) {
+    if (!text) return false;
+    try {
+      await navigator.clipboard.writeText(text);
+      return true;
+    } catch (_) {
+      if (fallbackInput) {
+        const prevStart = fallbackInput.selectionStart;
+        const prevEnd = fallbackInput.selectionEnd;
+        fallbackInput.focus();
+        fallbackInput.select();
+        const ok = Boolean(document.execCommand && document.execCommand("copy"));
+        fallbackInput.setSelectionRange(prevStart || 0, prevEnd || 0);
+        return ok;
+      }
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = Boolean(document.execCommand && document.execCommand("copy"));
+      ta.remove();
+      return ok;
+    }
+  }
+
+  function flashCheckButton(btn) {
+    if (btn._checkTimer) clearTimeout(btn._checkTimer);
+    btn.classList.add("is-checked");
+    btn.disabled = false;
+    btn._checkTimer = setTimeout(() => {
+      btn._checkTimer = null;
+      btn.classList.remove("is-checked");
+      syncNotesActions();
+    }, 1000);
+  }
+
+  function cancelAllDeleteConfirms(exceptWrap) {
+    document.querySelectorAll(".del-confirm-wrap.confirming").forEach((w) => {
+      if (exceptWrap && w === exceptWrap) return;
+      w.classList.remove("confirming");
+      const blk = w.closest(".note-block");
+      if (blk) blk.classList.remove("is-confirming");
+    });
+  }
+
+  /* Left Dot Scrollbar (Antigravity style) */
+  function syncDots(viewport, dotsEl) {
+    if (!viewport || !dotsEl) return;
+    const overflow = viewport.scrollHeight - viewport.clientHeight;
+    if (overflow <= 2) {
+      dotsEl.classList.remove("visible");
+      dotsEl.dataset.count = "0";
+      dotsEl.innerHTML = "";
+      return;
+    }
+    const items = Array.from(viewport.children).filter(
+      (el) => el.classList.contains("note-block") || el.classList.contains("search-block")
+    );
+    if (items.length <= 1) {
+      dotsEl.classList.remove("visible");
+      return;
+    }
+
+    dotsEl.classList.add("visible");
+    const count = Math.min(items.length, 14);
+    if (dotsEl.dataset.count !== String(count)) {
+      dotsEl.dataset.count = String(count);
+      dotsEl.innerHTML = "";
+      for (let i = 0; i < count; i++) {
+        const dot = document.createElement("button");
+        dot.type = "button";
+        dot.className = "cards-dot";
+        dot.tabIndex = -1;
+        dot.addEventListener("click", (e) => {
+          e.stopPropagation();
+          const liveItems = Array.from(viewport.children).filter(
+            (el) => el.classList.contains("note-block") || el.classList.contains("search-block")
+          );
+          const liveCount = Math.min(liveItems.length, 14);
+          const maxScroll = Math.max(0, viewport.scrollHeight - viewport.clientHeight);
+          if (liveItems.length === liveCount) {
+            const target = liveItems[i];
+            if (target) {
+              viewport.scrollTo({ top: Math.min(maxScroll, target.offsetTop), behavior: "smooth" });
+            }
+          } else {
+            const ratio = liveCount > 1 ? i / (liveCount - 1) : 0;
+            viewport.scrollTo({ top: Math.round(maxScroll * ratio), behavior: "smooth" });
+          }
+        });
+        dotsEl.appendChild(dot);
+      }
+    }
+
+    const maxScroll = Math.max(1, viewport.scrollHeight - viewport.clientHeight);
+    let activeIdx = 0;
+    if (viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - 3) {
+      activeIdx = count - 1;
+    } else if (items.length === count) {
+      let best = 0;
+      for (let i = 0; i < items.length; i++) {
+        if (items[i].offsetTop <= viewport.scrollTop + 28) {
+          best = i;
+        } else {
+          break;
+        }
+      }
+      activeIdx = best;
+    } else {
+      activeIdx = Math.round((viewport.scrollTop / maxScroll) * (count - 1));
+    }
+
+    const dots = dotsEl.querySelectorAll(".cards-dot");
+    dots.forEach((d, idx) => d.classList.toggle("active", idx === activeIdx));
+  }
+
+  function bindDotViewport(viewportId, dotsId) {
+    const vp = $(viewportId);
+    const dots = $(dotsId);
+    vp.addEventListener("scroll", () => syncDots(vp, dots), { passive: true });
+    if (typeof ResizeObserver === "function") {
+      const ro = new ResizeObserver(() => syncDots(vp, dots));
+      ro.observe(vp);
+    }
+  }
+  bindDotViewport("notes-viewport", "notes-dots");
+  bindDotViewport("search-viewport", "search-dots");
+
+  function bindAutoHideScrollbar(el) {
+    if (!el || el._hasAutoSb) return;
+    el._hasAutoSb = true;
+    el.addEventListener("scroll", () => {
+      if (el.scrollHeight <= el.clientHeight + 2) return;
+      el.classList.add("is-scrolling");
+      if (el._sbTimer) clearTimeout(el._sbTimer);
+      el._sbTimer = setTimeout(() => {
+        el._sbTimer = null;
+        el.classList.remove("is-scrolling");
+      }, 850);
+    }, { passive: true });
+  }
+  bindAutoHideScrollbar($("notes-input"));
+
+  function maxTopNotesInputHeightPx() {
+    const panel = $("notes-panel");
+    const card = $("notes-card");
+    const input = $("notes-input");
+    const vp = $("notes-viewport");
+    if (!panel || !card || !input || !vp) return 220;
+    const cards = Array.from(vp.querySelectorAll(".note-block"));
+    if (cards.length === 0) return Math.max(46, panel.clientHeight - 56);
+    const topVisible = cards.find((c) => c.offsetTop + c.offsetHeight > vp.scrollTop + 4) || cards[0];
+    const panelH = panel.clientHeight;
+    const chromeH = Math.max(46, card.offsetHeight - input.offsetHeight);
+    const keepCardH = topVisible.offsetHeight + 4;
+    return Math.max(46, panelH - chromeH - 10 - keepCardH);
+  }
+
+  function measureTopNotesInputHeight(expanded) {
+    const input = $("notes-input");
+    const prevScroll = input.scrollTop;
+    const prevOverflow = input.style.overflowY;
+    const prevHeight = input.style.height;
+    input.classList.remove("is-animating");
+    input.style.overflowY = "hidden";
+    input.style.height = "0px";
+    const full = Math.max(46, input.scrollHeight);
+    const cap = expanded ? maxTopNotesInputHeightPx() : NOTES_COLLAPSED_PX;
+    const target = Math.max(46, Math.min(full, cap));
+    if (!expanded) {
+      state.notes.topCollapsedH = target;
+    } else {
+      state.notes.topCollapsedH = Math.max(46, Math.min(full, NOTES_COLLAPSED_PX));
+    }
+    input.style.height = prevHeight;
+    input.style.overflowY = prevOverflow || "hidden";
+    input.scrollTop = prevScroll;
+    return { full, target };
+  }
+
+  function topNotesExtraCollapsedPx() {
+    if (state.notes.cards.length === 0) return 0;
+    const input = $("notes-input");
+    const curH = input.offsetHeight || 46;
+    const target = state.notes.topCollapsedH || 46;
+    return Math.max(0, curH - target);
+  }
+
+  function maxNoteBlockEditorHeightPx(cardEl, editor) {
+    const vp = $("notes-viewport");
+    const baseVpH = vp ? vp.clientHeight : 0;
+    const vpH = baseVpH + (state.notes.topExpanded ? 0 : topNotesExtraCollapsedPx());
+    if (!vpH) return maxExpandedHeightPx();
+    const chrome = Math.max(38, cardEl.offsetHeight - editor.offsetHeight);
+    const nextCard = cardEl.nextElementSibling;
+    if (nextCard && nextCard.classList.contains("note-block")) {
+      return Math.max(NOTES_COLLAPSED_PX, vpH - chrome - 10 - nextCard.offsetHeight - 4);
+    }
+    return Math.max(NOTES_COLLAPSED_PX, vpH - chrome - 4);
+  }
+
+  function applyAutoGrowHeight(el, minH, maxH) {
+    const prevScroll = el.scrollTop;
+    const prevClientH = el.clientHeight;
+    const prevScrollH = el.scrollHeight;
+    const wasNearBottom = prevScrollH > prevClientH + 2 && (prevScroll + prevClientH >= prevScrollH - 8);
+
+    if (el._animTimer) {
+      clearTimeout(el._animTimer);
+      el._animTimer = null;
+    }
+    el.classList.remove("is-animating");
+    el.style.overflowY = "hidden";
+    el.style.height = "0px";
+    const full = Math.max(minH, el.scrollHeight);
+    const cap = Math.max(minH, maxH);
+    const target = Math.min(full, cap);
+    el.style.height = target + "px";
+
+    if (full > target) {
+      el.style.overflowY = "auto";
+      el.scrollTop = wasNearBottom ? el.scrollHeight : prevScroll;
+    } else {
+      el.style.overflowY = "hidden";
+      el.scrollTop = 0;
+    }
+    return { full, target };
+  }
+
+  function animateNoteEditorHeight(editor, startH, targetH, overflowAfter) {
+    if (editor._animTimer) {
+      clearTimeout(editor._animTimer);
+      editor._animTimer = null;
+    }
+    editor.classList.remove("is-animating");
+    editor.style.overflowY = "hidden";
+    editor.style.height = startH + "px";
+    void editor.offsetHeight;
+    editor.classList.add("is-animating");
+    editor.style.height = targetH + "px";
+    editor._animTimer = setTimeout(() => {
+      editor._animTimer = null;
+      editor.classList.remove("is-animating");
+      editor.style.overflowY = overflowAfter;
+    }, 295);
+  }
+
+  function expandTopNotesCard(animate) {
+    if (state.notes.cards.length === 0) return;
+    if (state.notes.topExpanded) return;
+    state.notes.topExpanded = true;
+    const input = $("notes-input");
+    const startH = input.offsetHeight || 46;
+    const { full, target } = measureTopNotesInputHeight(true);
+    if (animate && Math.abs(target - startH) > 1) {
+      animateNoteEditorHeight(input, startH, target, full > target ? "auto" : "hidden");
+      setTimeout(() => syncDots($("notes-viewport"), $("notes-dots")), 305);
+    } else {
+      applyAutoGrowHeight(input, 46, maxTopNotesInputHeightPx());
+      syncDots($("notes-viewport"), $("notes-dots"));
+    }
+  }
+
+  function collapseTopNotesCard(animate = true) {
+    if (!state.notes.topExpanded) return;
+    state.notes.topExpanded = false;
+    const input = $("notes-input");
+    if (document.activeElement === input) {
+      input.blur();
+    }
+    if (state.notes.cards.length === 0) return;
+    const startH = input.offsetHeight || 46;
+    const { target } = measureTopNotesInputHeight(false);
+    input.scrollTop = 0;
+    if (animate && Math.abs(target - startH) > 1) {
+      animateNoteEditorHeight(input, startH, target, "hidden");
+      setTimeout(() => syncDots($("notes-viewport"), $("notes-dots")), 305);
+    } else {
+      applyAutoGrowHeight(input, 46, NOTES_COLLAPSED_PX);
+      syncDots($("notes-viewport"), $("notes-dots"));
+    }
+  }
+
+  function syncTopNotesLayout() {
+    const hasCards = state.notes.cards.length > 0;
+    $("notes-card").classList.toggle("has-cards", hasCards);
+    $("notes-stage").classList.toggle("open", hasCards);
+    const input = $("notes-input");
+    if (!hasCards) {
+      state.notes.topExpanded = false;
+      state.notes.topCollapsedH = 46;
+      if (input._animTimer) {
+        clearTimeout(input._animTimer);
+        input._animTimer = null;
+      }
+      input.classList.remove("is-animating");
+      input.style.height = "";
+      input.style.overflowY = "auto";
+    } else {
+      const cap = state.notes.topExpanded ? maxTopNotesInputHeightPx() : NOTES_COLLAPSED_PX;
+      const { full } = applyAutoGrowHeight(input, 46, cap);
+      state.notes.topCollapsedH = Math.max(46, Math.min(full, NOTES_COLLAPSED_PX));
+    }
+    requestAnimationFrame(() => syncDots($("notes-viewport"), $("notes-dots")));
+  }
+
+  function scheduleNoteSave() {
+    const key = convKey(currentConv());
+    state.notes.conv = key;
+    state.notes.dirty = true;
+    state.notes.seq += 1;
+    setNoteDot(true, "");
+    syncNotesActions();
+    if (state.notes.timer) clearTimeout(state.notes.timer);
+    state.notes.timer = setTimeout(() => {
+      state.notes.timer = null;
+      flushNoteSave();
+    }, 1500);
+  }
+
+  async function saveNotesFor(key, payload, seq, keepalive) {
+    const convPayload = key === DRAFT_KEY ? "" : key;
+    try {
+      const res = await apiFetch("/api/notes", {
+        method: "POST",
+        keepalive: Boolean(keepalive),
+        body: JSON.stringify({
+          conversationId: convPayload,
+          draft: payload.draft,
+          cards: payload.cards,
+          next_id: payload.nextId,
+        }),
+      });
+      if (!res.ok) {
+        let serverMsg = "";
+        try {
+          const errJson = await res.json();
+          if (errJson && errJson.error) serverMsg = String(errJson.error);
+        } catch (_) {
+        }
+        const err = new Error(serverMsg || ("HTTP " + res.status));
+        err.serverMsg = serverMsg;
+        throw err;
+      }
+      if (state.notes.conv === key) {
+        state.notes.savedSeq = Math.max(state.notes.savedSeq, seq);
+        if (state.notes.seq === seq && !state.notes.dirty) {
+          setNoteDot(false, "");
+        }
+      }
+    } catch (err) {
+      if (state.notes.conv === key && state.notes.seq === seq) {
+        state.notes.dirty = true;
+        setNoteDot(true, err && err.serverMsg ? err.serverMsg : "");
+      }
+    }
+  }
+
+  function currentNotesSnapshot() {
+    return {
+      draft: $("notes-input").value,
+      cards: state.notes.cards.map((c) => ({ id: c.id, text: c.text, pinned: Boolean(c.pinned) })),
+      nextId: state.notes.nextId,
+    };
+  }
+
+  function flushNoteSave(opts) {
+    if (state.notes.timer) {
+      clearTimeout(state.notes.timer);
+      state.notes.timer = null;
+    }
+    const key = state.notes.conv;
+    if (!state.notes.dirty || !key) return;
+    state.notes.dirty = false;
+    const seq = state.notes.seq;
+    saveNotesFor(key, currentNotesSnapshot(), seq, opts && opts.keepalive);
+  }
+
+  function measureNoteEditorHeight(cardEl, editor, expanded) {
+    const prevScroll = editor.scrollTop;
+    const prevOverflow = editor.style.overflowY;
+    editor.classList.remove("is-animating");
+    editor.style.overflowY = "hidden";
+    editor.style.height = "0px";
+    const full = Math.max(22, editor.scrollHeight);
+    const cap = expanded ? maxNoteBlockEditorHeightPx(cardEl, editor) : NOTES_COLLAPSED_PX;
+    const target = Math.min(full, cap);
+    editor.style.overflowY = prevOverflow || "hidden";
+    editor.scrollTop = prevScroll;
+    return { full, target };
+  }
+
+  function keepNextCardVisible(cardEl, smooth) {
+    const vp = $("notes-viewport");
+    if (!vp || !cardEl) return;
+    if (cardEl.offsetTop < vp.scrollTop) {
+      if (smooth) {
+        vp.scrollTo({ top: cardEl.offsetTop, behavior: "smooth" });
+      } else {
+        vp.scrollTop = cardEl.offsetTop;
+      }
+      return;
+    }
+    const nextCard = cardEl.nextElementSibling;
+    if (nextCard && nextCard.classList.contains("note-block")) {
+      const needTop = (nextCard.offsetTop + nextCard.offsetHeight + 4) - vp.clientHeight;
+      if (needTop > vp.scrollTop) {
+        const dest = Math.min(cardEl.offsetTop, Math.max(0, needTop));
+        if (smooth) {
+          vp.scrollTo({ top: dest, behavior: "smooth" });
+        } else {
+          vp.scrollTop = dest;
+        }
+      }
+    } else if (smooth) {
+      cardEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+    }
+  }
+
+  function collapseNoteCard(cardEl) {
+    if (!cardEl || !cardEl.classList.contains("expanded")) return;
+    const editor = cardEl.querySelector(".block-editor");
+    if (document.activeElement === editor) {
+      editor.blur();
+    }
+    flushNoteSave();
+    const startH = editor.offsetHeight || NOTES_COLLAPSED_PX;
+    const { full, target } = measureNoteEditorHeight(cardEl, editor, false);
+    cardEl.classList.remove("expanded");
+    editor.classList.toggle("is-clipped", full > target + 2);
+    editor.readOnly = true;
+    editor.scrollTop = 0;
+    animateNoteEditorHeight(editor, startH, target, "hidden");
+    if (state.notes.expandedCardId === Number(cardEl.dataset.cardId)) {
+      state.notes.expandedCardId = null;
+    }
+    setTimeout(() => syncDots($("notes-viewport"), $("notes-dots")), 305);
+  }
+
+  function collapseAllNoteCards(exceptId) {
+    $("notes-viewport").querySelectorAll(".note-block.expanded").forEach((el) => {
+      if (exceptId !== undefined && Number(el.dataset.cardId) === exceptId) return;
+      collapseNoteCard(el);
+    });
+  }
+
+  function expandNoteCard(cardEl, focusEditor) {
+    const id = Number(cardEl.dataset.cardId);
+    collapseAllNoteCards(id);
+    const editor = cardEl.querySelector(".block-editor");
+    const startH = editor.offsetHeight || NOTES_COLLAPSED_PX;
+    const { full, target } = measureNoteEditorHeight(cardEl, editor, true);
+    cardEl.classList.add("expanded");
+    editor.classList.remove("is-clipped");
+    state.notes.expandedCardId = id;
+    editor.readOnly = false;
+    animateNoteEditorHeight(editor, startH, target, full > target ? "auto" : "hidden");
+    if (focusEditor) {
+      try {
+        editor.focus({ preventScroll: true });
+      } catch (_) {
+        editor.focus();
+      }
+    }
+    setTimeout(() => {
+      keepNextCardVisible(cardEl, true);
+      syncDots($("notes-viewport"), $("notes-dots"));
+    }, 305);
+  }
+
+  function sortNoteCards() {
+    const pinned = [];
+    const rest = [];
+    for (const c of state.notes.cards) {
+      if (c.pinned) pinned.push(c);
+      else rest.push(c);
+    }
+    state.notes.cards = pinned.concat(rest);
+  }
+
+  function buildNoteBlockElement(card) {
+    const el = document.createElement("div");
+    el.className = "note-block" + (card.pinned ? " pinned" : "");
+    el.dataset.cardId = String(card.id);
+
+    const head = document.createElement("div");
+    head.className = "block-head";
+
+    const leftGroup = document.createElement("div");
+    leftGroup.className = "notes-actions-group";
+
+    const copyBtn = document.createElement("button");
+    copyBtn.type = "button";
+    copyBtn.className = "notes-action";
+    setTip(copyBtn, "Copy card");
+    copyBtn.setAttribute("aria-label", "Copy card");
+    copyBtn.innerHTML = ICON_COPY;
+    copyBtn.addEventListener("click", async (e) => {
+      e.stopPropagation();
+      const editor = el.querySelector(".block-editor");
+      const ok = await copyPlainText(card.text, el.classList.contains("expanded") ? editor : null);
+      if (ok) flashCheckButton(copyBtn);
+    });
+
+    const pinBtn = document.createElement("button");
+    pinBtn.type = "button";
+    pinBtn.className = "notes-action pin-btn" + (card.pinned ? " is-pinned" : "");
+    const pinLabel = card.pinned ? "Unpin card" : "Pin to top";
+    setTip(pinBtn, pinLabel);
+    pinBtn.setAttribute("aria-label", pinLabel);
+    pinBtn.setAttribute("aria-pressed", card.pinned ? "true" : "false");
+    pinBtn.innerHTML = ICON_PIN;
+    pinBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      togglePinNoteCard(card.id);
+    });
+
+    leftGroup.appendChild(copyBtn);
+    leftGroup.appendChild(pinBtn);
+
+    const delWrap = document.createElement("div");
+    delWrap.className = "del-confirm-wrap";
+
+    const trashBtn = document.createElement("button");
+    trashBtn.type = "button";
+    trashBtn.className = "notes-action del-trash-btn";
+    setTip(trashBtn, "Delete card");
+    trashBtn.setAttribute("aria-label", "Delete card");
+    trashBtn.innerHTML = ICON_TRASH;
+
+    const confirmBtns = document.createElement("div");
+    confirmBtns.className = "del-confirm-btns";
+
+    const okBtn = document.createElement("button");
+    okBtn.type = "button";
+    okBtn.className = "notes-action confirm-ok";
+    setTip(okBtn, "Confirm delete");
+    okBtn.setAttribute("aria-label", "Confirm delete");
+    okBtn.innerHTML = ICON_CHECK;
+
+    const cancelBtn = document.createElement("button");
+    cancelBtn.type = "button";
+    cancelBtn.className = "notes-action confirm-cancel";
+    setTip(cancelBtn, "Cancel");
+    cancelBtn.setAttribute("aria-label", "Cancel");
+    cancelBtn.innerHTML = ICON_X;
+
+    trashBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      cancelAllDeleteConfirms(delWrap);
+      delWrap.classList.add("confirming");
+      el.classList.add("is-confirming");
+    });
+
+    cancelBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      delWrap.classList.remove("confirming");
+      el.classList.remove("is-confirming");
+    });
+
+    okBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      deleteNoteCard(card.id);
+    });
+
+    confirmBtns.appendChild(okBtn);
+    confirmBtns.appendChild(cancelBtn);
+    delWrap.appendChild(trashBtn);
+    delWrap.appendChild(confirmBtns);
+
+    head.appendChild(leftGroup);
+    head.appendChild(delWrap);
+
+    const editor = document.createElement("textarea");
+    editor.className = "block-editor";
+    editor.spellcheck = false;
+    editor.readOnly = true;
+    editor.value = card.text;
+
+    attachCtxMenu(editor);
+    bindAutoHideScrollbar(editor);
+
+    editor.addEventListener("input", () => {
+      card.text = editor.value;
+      const expanded = el.classList.contains("expanded");
+      const maxH = expanded ? maxNoteBlockEditorHeightPx(el, editor) : NOTES_COLLAPSED_PX;
+      const { full, target } = applyAutoGrowHeight(editor, 22, maxH);
+      editor.classList.toggle("is-clipped", !expanded && full > target + 2);
+      if (expanded) {
+        keepNextCardVisible(el, false);
+      }
+      syncDots($("notes-viewport"), $("notes-dots"));
+      scheduleNoteSave();
+    });
+    editor.addEventListener("blur", () => flushNoteSave());
+
+    el.addEventListener("click", (e) => {
+      if (e.target.closest(".notes-action, .del-confirm-wrap")) return;
+      if (!el.classList.contains("expanded")) {
+        expandNoteCard(el, true);
+      }
+    });
+
+    el.appendChild(head);
+    el.appendChild(editor);
+    return el;
+  }
+
+  function renderNoteCards() {
+    const vp = $("notes-viewport");
+    vp.innerHTML = "";
+    state.notes.expandedCardId = null;
+    syncTopNotesLayout();
+    for (const card of state.notes.cards) {
+      const el = buildNoteBlockElement(card);
+      vp.appendChild(el);
+      const editor = el.querySelector(".block-editor");
+      const { full, target } = applyAutoGrowHeight(editor, 22, NOTES_COLLAPSED_PX);
+      editor.classList.toggle("is-clipped", full > target + 2);
+    }
+    requestAnimationFrame(() => syncDots(vp, $("notes-dots")));
+  }
+
+  function animateNoteCardsReorder(vp, targetEl, shouldScrollToTarget, onBeforePlay) {
+    const blocks = Array.from(vp.querySelectorAll(".note-block"));
+    const firstTops = new Map();
+    for (const el of blocks) {
+      firstTops.set(el, el.getBoundingClientRect().top);
+    }
+
+    for (const el of blocks) {
+      if (el._flipTimer) {
+        clearTimeout(el._flipTimer);
+        el._flipTimer = null;
+      }
+      el.style.transition = "none";
+      el.style.transform = "";
+      el.style.zIndex = "";
+      el.style.position = "";
+    }
+
+    const elById = new Map();
+    for (const el of blocks) {
+      elById.set(Number(el.dataset.cardId), el);
+    }
+
+    if (targetEl) {
+      const newIdx = state.notes.cards.findIndex((c) => c.id === Number(targetEl.dataset.cardId));
+      if (newIdx >= 0) {
+        let refEl = null;
+        for (let j = newIdx + 1; j < state.notes.cards.length; j++) {
+          const cand = elById.get(state.notes.cards[j].id);
+          if (cand && cand !== targetEl) {
+            refEl = cand;
+            break;
+          }
+        }
+        vp.insertBefore(targetEl, refEl);
+      }
+    }
+
+    for (let i = 0; i < state.notes.cards.length; i++) {
+      const wantEl = elById.get(state.notes.cards[i].id);
+      if (!wantEl) continue;
+      const curAtI = vp.children[i];
+      if (curAtI !== wantEl) {
+        vp.insertBefore(wantEl, curAtI || null);
+      }
+    }
+
+    if (shouldScrollToTarget && targetEl) {
+      const targetScrollTop = Math.max(
+        0,
+        vp.scrollTop + (targetEl.getBoundingClientRect().top - vp.getBoundingClientRect().top)
+      );
+      if (vp.scrollTop > targetScrollTop) {
+        vp.scrollTop = targetScrollTop;
+      }
+    }
+
+    const vpRect = vp.getBoundingClientRect();
+    const visTop = vpRect.top - 120;
+    const visBot = vpRect.bottom + 120;
+    const moving = [];
+
+    for (const el of blocks) {
+      const prevTop = firstTops.get(el);
+      if (prevTop === undefined) {
+        el.style.transition = "";
+        continue;
+      }
+      const nextRect = el.getBoundingClientRect();
+      const dy = prevTop - nextRect.top;
+      const inView =
+        (prevTop + nextRect.height >= visTop && prevTop <= visBot) ||
+        (nextRect.bottom >= visTop && nextRect.top <= visBot);
+      if (inView && Math.abs(dy) > 0.5) {
+        el.style.transform = "translateY(" + dy.toFixed(2) + "px)";
+        if (el === targetEl) {
+          el.style.position = "relative";
+          el.style.zIndex = "2";
+        }
+        moving.push(el);
+      } else {
+        el.style.transition = "";
+      }
+    }
+
+    void vp.offsetHeight;
+
+    for (const el of moving) {
+      el.style.transition = "transform 0.34s cubic-bezier(0.22, 1, 0.36, 1), border-color 0.28s ease, background-color 0.22s ease";
+      el.style.transform = "";
+      el._flipTimer = setTimeout(() => {
+        el._flipTimer = null;
+        el.style.transition = "";
+        el.style.zIndex = "";
+        el.style.position = "";
+      }, 360);
+    }
+
+    if (onBeforePlay) {
+      onBeforePlay();
+    }
+
+    setTimeout(() => syncDots(vp, $("notes-dots")), 365);
+  }
+
+  function togglePinNoteCard(cardId) {
+    const oldIdx = state.notes.cards.findIndex((c) => c.id === cardId);
+    if (oldIdx < 0) return;
+    const card = state.notes.cards[oldIdx];
+    if (state.notes.timer) {
+      clearTimeout(state.notes.timer);
+      state.notes.timer = null;
+    }
+    card.pinned = !card.pinned;
+    sortNoteCards();
+    const newIdx = state.notes.cards.findIndex((c) => c.id === cardId);
+
+    const vp = $("notes-viewport");
+    const targetEl = vp.querySelector('.note-block[data-card-id="' + cardId + '"]');
+    if (!targetEl) {
+      renderNoteCards();
+      if (card.pinned) {
+        vp.scrollTop = 0;
+      }
+    } else {
+      const pinBtn = targetEl.querySelector(".pin-btn");
+      const pinLabel = card.pinned ? "Unpin card" : "Pin to top";
+      const applyPinVisuals = () => {
+        targetEl.classList.toggle("pinned", card.pinned);
+        if (pinBtn) {
+          pinBtn.classList.toggle("is-pinned", card.pinned);
+          setTip(pinBtn, pinLabel);
+          pinBtn.setAttribute("aria-label", pinLabel);
+          pinBtn.setAttribute("aria-pressed", card.pinned ? "true" : "false");
+        }
+      };
+
+      if (oldIdx === newIdx) {
+        applyPinVisuals();
+      } else {
+        animateNoteCardsReorder(vp, targetEl, card.pinned, applyPinVisuals);
+      }
+    }
+
+    const key = convKey(currentConv());
+    state.notes.conv = key;
+    state.notes.seq += 1;
+    state.notes.dirty = false;
+    setNoteDot(false, "");
+    syncNotesActions();
+    saveNotesFor(key, currentNotesSnapshot(), state.notes.seq, false);
+  }
+
+  function deleteNoteCard(cardId) {
+    if (state.notes.timer) {
+      clearTimeout(state.notes.timer);
+      state.notes.timer = null;
+    }
+    state.notes.cards = state.notes.cards.filter((c) => c.id !== cardId);
+    if (state.notes.expandedCardId === cardId) {
+      state.notes.expandedCardId = null;
+    }
+    renderNoteCards();
+    const key = convKey(currentConv());
+    state.notes.conv = key;
+    state.notes.seq += 1;
+    state.notes.dirty = false;
+    setNoteDot(false, "");
+    syncNotesActions();
+    saveNotesFor(key, currentNotesSnapshot(), state.notes.seq, false);
+  }
+
+  async function syncNotesConv(conv) {
+    const key = convKey(conv);
+    if (state.notes.conv === key) return;
+
+    if (state.notes.timer) {
+      clearTimeout(state.notes.timer);
+      state.notes.timer = null;
+    }
+    const hadDirtyPrev = Boolean(state.notes.dirty && state.notes.conv);
+    const prevKey = state.notes.conv;
+    const prevSnap = hadDirtyPrev ? currentNotesSnapshot() : null;
+    const prevSeq = state.notes.seq;
+
+    cancelAllDeleteConfirms();
+    state.notes.conv = key;
+    state.notes.draft = "";
+    state.notes.cards = [];
+    state.notes.nextId = 1;
+    state.notes.dirty = false;
+    state.notes.seq = 0;
+    state.notes.savedSeq = 0;
+    state.notes.topExpanded = false;
+    state.notes.topCollapsedH = 46;
+    setNoteDot(false, "");
+
+    $("notes-input").value = "";
+    renderNoteCards();
+    syncNotesActions();
+    state.notes.loadingConv = key;
+
+    if (hadDirtyPrev && prevKey && prevSnap) {
+      await saveNotesFor(prevKey, prevSnap, prevSeq, false);
+    }
+
+    try {
+      const q = new URLSearchParams({ conversationId: key });
+      const res = await apiFetch("/api/notes?" + q.toString(), { method: "GET" });
+      if (!res.ok) return;
+      const data = await res.json();
+      if (state.notes.conv === key && !state.notes.dirty && state.notes.seq === 0) {
+        state.notes.draft = data.draft || "";
+        state.notes.cards = Array.isArray(data.cards)
+          ? data.cards.map((c) => ({
+            id: Number(c.id) || 1,
+            text: String(c.text || ""),
+            pinned: Boolean(c.pinned),
+          }))
+          : [];
+        sortNoteCards();
+        state.notes.nextId = Number(data.next_id) || (state.notes.cards.length + 1);
+        $("notes-input").value = state.notes.draft;
+        renderNoteCards();
+        syncNotesActions();
+      }
+    } catch (_) {
+    } finally {
+      if (state.notes.loadingConv === key) {
+        state.notes.loadingConv = "";
+      }
+    }
+  }
+
+  function syncNotesActions() {
+    const val = $("notes-input").value;
+    const hasText = Boolean(val);
+    const hasAddable = Boolean(val && val.trim());
+    const atCardLimit = state.notes.cards.length >= MAX_NOTE_CARDS;
+    const copyBtn = $("notes-copy-btn");
+    const addBtn = $("notes-add-btn");
+    const clearBtn = $("notes-clear-btn");
+    copyBtn.disabled = !hasText && !copyBtn.classList.contains("is-checked");
+    addBtn.disabled = !hasAddable || atCardLimit;
+    setTip(
+      addBtn,
+      atCardLimit
+        ? "Maximum " + MAX_NOTE_CARDS + " cards per chat reached"
+        : "Save as card below (Ctrl+Enter)"
+    );
+    clearBtn.disabled = !hasText && !clearBtn.classList.contains("is-checked");
+    if (!hasText) {
+      $("notes-clear-wrap").classList.remove("confirming");
+    }
+  }
+
+  $("notes-copy-btn").addEventListener("click", async () => {
+    const input = $("notes-input");
+    if (!input.value) return;
+    if (await copyPlainText(input.value, input)) {
+      flashCheckButton($("notes-copy-btn"));
+    }
+  });
+
+  $("notes-add-btn").addEventListener("click", () => {
+    const input = $("notes-input");
+    const text = input.value;
+    if (!text || !text.trim() || state.notes.cards.length >= MAX_NOTE_CARDS) return;
+
+    if (state.notes.timer) {
+      clearTimeout(state.notes.timer);
+      state.notes.timer = null;
+    }
+
+    const newCard = {
+      id: state.notes.nextId++,
+      text,
+      pinned: false,
+    };
+    state.notes.cards.unshift(newCard);
+    sortNoteCards();
+    input.value = "";
+    state.notes.draft = "";
+    state.notes.topExpanded = false;
+
+    const key = convKey(currentConv());
+    state.notes.conv = key;
+    state.notes.seq += 1;
+    state.notes.dirty = false;
+    setNoteDot(false, "");
+
+    renderNoteCards();
+    $("notes-viewport").scrollTop = 0;
+    syncNotesActions();
+    saveNotesFor(key, currentNotesSnapshot(), state.notes.seq, false);
+  });
+
+  $("notes-clear-btn").addEventListener("click", (e) => {
+    e.stopPropagation();
+    if (!$("notes-input").value) return;
+    const wrap = $("notes-clear-wrap");
+    cancelAllDeleteConfirms(wrap);
+    wrap.classList.add("confirming");
+  });
+
+  $("notes-clear-cancel").addEventListener("click", (e) => {
+    e.stopPropagation();
+    $("notes-clear-wrap").classList.remove("confirming");
+  });
+
+  $("notes-clear-ok").addEventListener("click", (e) => {
+    e.stopPropagation();
+    const wrap = $("notes-clear-wrap");
+    wrap.classList.remove("confirming");
+    const input = $("notes-input");
+    if (!input.value) return;
+    if (state.notes.timer) {
+      clearTimeout(state.notes.timer);
+      state.notes.timer = null;
+    }
+    input.focus();
+    const ok = document.execCommand &&
+      document.execCommand("selectAll") &&
+      document.execCommand("delete");
+    if (!ok) {
+      input.value = "";
+    }
+    state.notes.draft = "";
+    const key = convKey(currentConv());
+    state.notes.conv = key;
+    state.notes.seq += 1;
+    state.notes.dirty = false;
+    setNoteDot(false, "");
+    syncTopNotesLayout();
+    syncNotesActions();
+    flashCheckButton($("notes-clear-btn"));
+    saveNotesFor(key, currentNotesSnapshot(), state.notes.seq, false);
+  });
+
+  $("notes-copy-btn").addEventListener("mousedown", (e) => e.preventDefault());
+  $("notes-clear-btn").addEventListener("mousedown", (e) => e.preventDefault());
+  $("notes-clear-cancel").addEventListener("mousedown", (e) => e.preventDefault());
+  $("notes-clear-ok").addEventListener("mousedown", (e) => e.preventDefault());
+
+  $("notes-input").addEventListener("focus", () => {
+    if (state.notes.cards.length > 0) {
+      expandTopNotesCard(true);
+    }
+  });
+  $("notes-input").addEventListener("input", () => {
+    state.notes.draft = $("notes-input").value;
+    if (state.notes.cards.length > 0) {
+      state.notes.topExpanded = true;
+    }
+    syncTopNotesLayout();
+    scheduleNoteSave();
+  });
+  $("notes-input").addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault();
+      if (!$("notes-add-btn").disabled) {
+        $("notes-add-btn").click();
+      }
+    }
+  });
+  $("notes-input").addEventListener("blur", (e) => {
+    flushNoteSave();
+    if (e.relatedTarget && $("notes-card").contains(e.relatedTarget) && !e.relatedTarget.closest(".mode-tab")) {
+      return;
+    }
+    collapseTopNotesCard(true);
+  });
+
+  function recalcVisibleCardsHeights() {
+    if (state.notes.mode === "notes") {
+      const panel = $("notes-panel");
+      if (!panel || panel.clientWidth === 0) return;
+      if (state.notes.cards.length > 0) {
+        syncTopNotesLayout();
+      }
+      const vp = $("notes-viewport");
+      vp.querySelectorAll(".note-block").forEach((cardEl) => {
+        const ed = cardEl.querySelector(".block-editor");
+        if (!ed) return;
+        const expanded = cardEl.classList.contains("expanded");
+        const maxH = expanded ? maxNoteBlockEditorHeightPx(cardEl, ed) : NOTES_COLLAPSED_PX;
+        const { full, target } = applyAutoGrowHeight(ed, 22, maxH);
+        ed.classList.toggle("is-clipped", !expanded && full > target + 2);
+      });
+      syncDots(vp, $("notes-dots"));
+    } else if (state.notes.mode === "search") {
+      const panel = $("search-panel");
+      if (!panel || panel.clientWidth === 0) return;
+      const vp = $("search-viewport");
+      vp.querySelectorAll(".search-block").forEach((cardEl) => {
+        const body = cardEl.querySelector(".search-body");
+        if (!body) return;
+        const expanded = cardEl.classList.contains("expanded");
+        body.style.transition = "none";
+        body.style.height = "auto";
+        const fullH = Math.max(20, body.scrollHeight);
+        const cap = expanded ? maxExpandedHeightPx() : SEARCH_COLLAPSED_PX;
+        const targetH = Math.min(fullH, cap);
+        body.style.overflowY = expanded && fullH > targetH ? "auto" : "hidden";
+        body.style.height = targetH + "px";
+        void body.offsetHeight;
+        body.style.transition = "";
+      });
+      syncDots(vp, $("search-dots"));
+    }
+  }
+
+  /* Workspace Mode Switching (Notes <-> Search) */
+  function setWorkspaceMode(mode) {
+    if (state.notes.mode === mode) return;
+    const prevMode = state.notes.mode;
+    cancelAllDeleteConfirms();
+    if (mode === "search") {
+      flushNoteSave();
+      collapseTopNotesCard(false);
+      collapseAllNoteCards();
+    } else {
+      collapseAllSearchBlocks();
+    }
+    state.notes.mode = mode;
+    $("notes-panel").classList.toggle("open", mode === "notes");
+    $("search-panel").classList.toggle("open", mode === "search");
+
+    const targetPanel = $(mode === "search" ? "search-panel" : "notes-panel");
+    const targetSwitch = targetPanel.querySelector(".mode-switch");
+    if (targetSwitch) {
+      targetSwitch.classList.add("no-anim");
+      targetSwitch.classList.toggle("is-search", prevMode === "search");
+      void targetSwitch.offsetWidth;
+      targetSwitch.classList.remove("no-anim");
+      targetSwitch.classList.toggle("is-search", mode === "search");
+    }
+
+    if (mode === "search") {
+      $("search-input").focus();
+      const conv = currentConv();
+      if (state.search.query.trim() && (state.search.conv !== conv || state.search.lastScope !== state.search.scope)) {
+        runChatSearch();
+      } else {
+        recalcVisibleCardsHeights();
+      }
+    } else {
+      recalcVisibleCardsHeights();
+    }
+  }
+
+  document.querySelectorAll(".mode-tab").forEach((tab) => {
+    tab.addEventListener("click", () => {
+      setWorkspaceMode(tab.dataset.mode);
+    });
+  });
+
+  /* Chat Context Search */
+  function escapeHtml(str) {
+    return str
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  function parseQueryTerms(rawQuery) {
+    const trimmed = (rawQuery || "").trim();
+    if (!trimmed) return [];
+    if (
+      trimmed.length >= 2 &&
+      ((trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+        (trimmed.startsWith("«") && trimmed.endsWith("»")))
+    ) {
+      const inner = trimmed.slice(1, -1).trim().toLowerCase();
+      return inner ? [inner] : [];
+    }
+    return trimmed
+      .split(/\s+/)
+      .map((w) => w.toLowerCase())
+      .filter(Boolean);
+  }
+
+  function highlightHtml(text, query) {
+    if (!text) return "";
+    const terms = parseQueryTerms(query);
+    if (terms.length === 0) return escapeHtml(text);
+    const lowerText = text.toLowerCase();
+    if (lowerText.length !== text.length) {
+      return escapeHtml(text);
+    }
+
+    const ranges = [];
+    for (const term of terms) {
+      let pos = 0;
+      while (pos < lowerText.length) {
+        const idx = lowerText.indexOf(term, pos);
+        if (idx < 0) break;
+        ranges.push([idx, idx + term.length]);
+        pos = idx + term.length;
+      }
+    }
+    if (ranges.length === 0) return escapeHtml(text);
+
+    ranges.sort((a, b) => (a[0] !== b[0] ? a[0] - b[0] : b[1] - a[1]));
+    const merged = [ranges[0]];
+    for (let i = 1; i < ranges.length; i++) {
+      const prev = merged[merged.length - 1];
+      const cur = ranges[i];
+      if (cur[0] <= prev[1]) {
+        if (cur[1] > prev[1]) prev[1] = cur[1];
+      } else {
+        merged.push(cur);
+      }
+    }
+
+    let out = "";
+    let cursor = 0;
+    for (const [start, end] of merged) {
+      if (start > cursor) {
+        out += escapeHtml(text.slice(cursor, start));
+      }
+      out += "<mark>" + escapeHtml(text.slice(start, end)) + "</mark>";
+      cursor = end;
+    }
+    if (cursor < text.length) {
+      out += escapeHtml(text.slice(cursor));
+    }
+    return out;
+  }
+
+  function roleBadgeInfo(role) {
+    if (role === "user") return { label: "You", cls: "role-user" };
+    if (role === "summary") return { label: "Summary", cls: "role-summary" };
+    return { label: "Agent", cls: "" };
+  }
+
+  function collapseSearchBlock(cardEl) {
+    if (!cardEl || !cardEl.classList.contains("expanded")) return;
+    const body = cardEl.querySelector(".search-body");
+    const snippetHtml = cardEl._snippetHtml || "";
+    const startH = body.offsetHeight;
+
+    body.style.transition = "none";
+    body.innerHTML = snippetHtml;
+    body.style.height = "auto";
+    const targetH = Math.min(Math.max(20, body.scrollHeight), SEARCH_COLLAPSED_PX);
+    body.style.height = startH + "px";
+    void body.offsetHeight;
+    body.style.transition = "";
+
+    cardEl.classList.remove("expanded");
+    body.scrollTop = 0;
+    body.style.overflowY = "hidden";
+    body.style.height = targetH + "px";
+    setTimeout(() => syncDots($("search-viewport"), $("search-dots")), 300);
+  }
+
+  function collapseAllSearchBlocks(exceptEl) {
+    $("search-viewport").querySelectorAll(".search-block.expanded").forEach((el) => {
+      if (exceptEl && el === exceptEl) return;
+      collapseSearchBlock(el);
+    });
+  }
+
+  function expandSearchBlock(cardEl) {
+    collapseAllSearchBlocks(cardEl);
+    const body = cardEl.querySelector(".search-body");
+    const fullHtml = cardEl._fullHtml || "";
+    const startH = body.offsetHeight;
+
+    body.style.transition = "none";
+    body.innerHTML = fullHtml;
+    body.style.height = "auto";
+    const fullH = Math.max(20, body.scrollHeight);
+    const targetH = Math.min(fullH, maxExpandedHeightPx());
+    body.style.height = startH + "px";
+    void body.offsetHeight;
+    body.style.transition = "";
+
+    cardEl.classList.add("expanded");
+    body.style.overflowY = fullH > targetH ? "auto" : "hidden";
+    body.style.height = targetH + "px";
+
+    setTimeout(() => {
+      const firstMark = body.querySelector("mark");
+      if (firstMark && fullH > targetH) {
+        const markTop = firstMark.offsetTop - body.offsetTop;
+        body.scrollTop = Math.max(0, markTop - Math.floor(targetH / 3));
+      }
+      cardEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
+      syncDots($("search-viewport"), $("search-dots"));
+    }, 60);
+  }
+
+  function renderSearchResults(query) {
+    const vp = $("search-viewport");
+    const countEl = $("search-count");
+    const isAllScope = state.search.scope === "all";
+    vp.innerHTML = "";
+
+    if (!query.trim()) {
+      countEl.textContent = "";
+      vp.innerHTML = isAllScope
+        ? '<div class="search-empty">Search prompts, replies, and summaries across all chats</div>'
+        : '<div class="search-empty">Search prompts, replies, and compacted summaries</div>';
+      syncDots(vp, $("search-dots"));
+      return;
+    }
+
+    if (!currentConv() && !isAllScope) {
+      countEl.textContent = "";
+      vp.innerHTML = '<div class="search-empty">Start or open a conversation to search its history</div>';
+      syncDots(vp, $("search-dots"));
+      return;
+    }
+
+    const total = state.search.total || 0;
+    const results = state.search.results || [];
+    if (results.length === 0) {
+      countEl.textContent = "0 found";
+      vp.innerHTML = '<div class="search-empty">No matches found</div>';
+      syncDots(vp, $("search-dots"));
+      return;
+    }
+
+    countEl.textContent = total > results.length ? (results.length + "+ found") : (total + " found");
+
+    for (const r of results) {
+      const el = document.createElement("div");
+      el.className = "search-block";
+      el.dataset.stepIndex = String(r.step_index);
+
+      const head = document.createElement("div");
+      head.className = "block-head";
+
+      const meta = document.createElement("div");
+      meta.className = "block-meta";
+
+      const badge = roleBadgeInfo(r.role);
+      const roleSpan = document.createElement("span");
+      roleSpan.className = "search-role" + (badge.cls ? " " + badge.cls : "");
+      roleSpan.textContent = badge.label;
+      meta.appendChild(roleSpan);
+
+      if (r.archived) {
+        const arch = document.createElement("span");
+        arch.className = "search-archived";
+        arch.textContent = "before compact";
+        meta.appendChild(arch);
+      }
+
+      if (r.created_at) {
+        const ts = document.createElement("span");
+        ts.textContent = fmtDateTime(r.created_at);
+        meta.appendChild(ts);
+      }
+
+      const copyBtn = document.createElement("button");
+      copyBtn.type = "button";
+      copyBtn.className = "notes-action";
+      setTip(copyBtn, "Copy full message");
+      copyBtn.setAttribute("aria-label", "Copy full message");
+      copyBtn.innerHTML = ICON_COPY;
+      copyBtn.addEventListener("click", async (e) => {
+        e.stopPropagation();
+        if (await copyPlainText(r.text)) {
+          flashCheckButton(copyBtn);
+        }
+      });
+
+      head.appendChild(copyBtn);
+      head.appendChild(meta);
+
+      const body = document.createElement("div");
+      body.className = "search-body";
+      const snippetHtml = highlightHtml(r.snippet || "", query);
+      const fullHtml = highlightHtml(r.text || "", query);
+      el._snippetHtml = snippetHtml;
+      el._fullHtml = fullHtml;
+      body.innerHTML = snippetHtml;
+      attachCtxMenu(body);
+      bindAutoHideScrollbar(body);
+
+      el.addEventListener("click", (e) => {
+        if (e.target.closest(".notes-action")) return;
+        if (!el.classList.contains("expanded")) {
+          expandSearchBlock(el);
+        }
+      });
+
+      el.appendChild(head);
+      if (isAllScope && r.chat_title) {
+        const titleEl = document.createElement("div");
+        titleEl.className = "search-chat-title" + (r.is_current ? " is-current" : "");
+        const titleText = r.chat_title + (r.is_current ? " · current" : "");
+        titleEl.textContent = titleText;
+        titleEl.setAttribute("data-tip-overflow", "1");
+        setTip(titleEl, titleText);
+        el.appendChild(titleEl);
+      }
+      el.appendChild(body);
+      vp.appendChild(el);
+
+      const targetH = Math.min(Math.max(20, body.scrollHeight), SEARCH_COLLAPSED_PX);
+      body.style.height = targetH + "px";
+    }
+
+    vp.scrollTop = 0;
+    requestAnimationFrame(() => syncDots(vp, $("search-dots")));
+  }
+
+  async function runChatSearch() {
+    const query = $("search-input").value;
+    state.search.query = query;
+    const conv = currentConv();
+    const scope = state.search.scope === "all" ? "all" : "this";
+    state.search.conv = conv;
+    state.search.lastScope = scope;
+    const mySeq = ++state.search.seq;
+
+    if (state.search.aborter) {
+      try { state.search.aborter.abort(); } catch (_) {}
+      state.search.aborter = null;
+    }
+
+    $("search-clear-btn").disabled = !query;
+
+    if (!query.trim() || (!conv && scope !== "all")) {
+      state.search.results = [];
+      state.search.total = 0;
+      renderSearchResults(query);
+      return;
+    }
+
+    const aborter = typeof AbortController === "function" ? new AbortController() : null;
+    state.search.aborter = aborter;
+
+    try {
+      const q = new URLSearchParams({ conversationId: conv, q: query, scope });
+      const opts = { method: "GET" };
+      if (aborter) opts.signal = aborter.signal;
+      const res = await apiFetch("/api/search?" + q.toString(), opts);
+      if (!res.ok) return;
+      const data = await res.json();
+      if (mySeq !== state.search.seq) return;
+      state.search.results = Array.isArray(data.results) ? data.results : [];
+      state.search.total = Number(data.total) || state.search.results.length;
+      renderSearchResults(query);
+    } catch (_) {
+    } finally {
+      if (state.search.aborter === aborter) {
+        state.search.aborter = null;
+      }
+    }
+  }
+
+  document.querySelectorAll(".scope-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const nextScope = btn.dataset.scope === "all" ? "all" : "this";
+      if (state.search.scope === nextScope) return;
+      state.search.scope = nextScope;
+      document.querySelectorAll(".scope-btn").forEach((b) => {
+        const active = b.dataset.scope === nextScope;
+        b.classList.toggle("active", active);
+        b.setAttribute("aria-pressed", active ? "true" : "false");
+      });
+      $("search-input").placeholder = nextScope === "all"
+        ? "Search across all chats…"
+        : "Search messages in this chat…";
+      if (state.search.timer) {
+        clearTimeout(state.search.timer);
+        state.search.timer = null;
+      }
+      runChatSearch();
+    });
+  });
+
+  $("search-input").addEventListener("input", () => {
+    const val = $("search-input").value;
+    $("search-clear-btn").disabled = !val;
+    state.search.query = val;
+    if (state.search.timer) clearTimeout(state.search.timer);
+    const delay = state.search.scope === "all" ? 240 : 150;
+    state.search.timer = setTimeout(() => {
+      state.search.timer = null;
+      runChatSearch();
+    }, delay);
+  });
+
+  $("search-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") {
+      if (state.search.timer) {
+        clearTimeout(state.search.timer);
+        state.search.timer = null;
+      }
+      runChatSearch();
+    }
+  });
+
+  $("search-clear-btn").addEventListener("click", () => {
+    if (state.search.timer) {
+      clearTimeout(state.search.timer);
+      state.search.timer = null;
+    }
+    $("search-input").value = "";
+    state.search.query = "";
+    state.search.results = [];
+    state.search.total = 0;
+    $("search-clear-btn").disabled = true;
+    renderSearchResults("");
+    $("search-input").focus();
+  });
+
+  /* About-style Outside Click / Key Auto-Collapse for Expanded Blocks & Delete Confirms */
+  function selectionInsideEl(el) {
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return false;
+    return el.contains(sel.getRangeAt(0).commonAncestorContainer);
+  }
+
+  document.addEventListener("pointerdown", (e) => {
+    if (!e.target.closest(".del-confirm-wrap.confirming")) {
+      cancelAllDeleteConfirms();
+    }
+    if (e.target.closest("#ctx-menu")) return;
+
+    if (state.notes.topExpanded && !e.target.closest("#notes-card")) {
+      collapseTopNotesCard(true);
+    }
+    const expNote = $("notes-viewport").querySelector(".note-block.expanded");
+    if (expNote && !expNote.contains(e.target)) {
+      collapseNoteCard(expNote);
+    }
+    const expSearch = $("search-viewport").querySelector(".search-block.expanded");
+    if (expSearch && !expSearch.contains(e.target)) {
+      collapseSearchBlock(expSearch);
+    }
+  }, true);
+
+  document.addEventListener("keydown", (e) => {
+    if (["Shift", "Control", "Alt", "Meta", "AltGraph"].includes(e.key)) return;
+
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && e.code === "KeyF") {
+      e.preventDefault();
+      setWorkspaceMode("search");
+      $("search-input").focus();
+      $("search-input").select();
+      return;
+    }
+
+    if (e.key === "Escape") {
+      cancelAllDeleteConfirms();
+      if (state.notes.topExpanded && !$("ctx-menu").classList.contains("open")) {
+        collapseTopNotesCard(true);
+        if (document.activeElement === $("notes-input")) {
+          $("notes-input").blur();
+        }
+      }
+    }
+
+    const expNote = $("notes-viewport").querySelector(".note-block.expanded");
+    if (expNote) {
+      const editor = expNote.querySelector(".block-editor");
+      const hasEditorSel = editor && (editor.selectionEnd || 0) > (editor.selectionStart || 0);
+      if ((e.ctrlKey || e.metaKey) && e.code === "KeyC" && (hasEditorSel || selectionInsideEl(expNote))) {
+        return;
+      }
+      if (!expNote.contains(e.target) || e.key === "Escape") {
+        if (!$("ctx-menu").classList.contains("open")) {
+          collapseNoteCard(expNote);
+        }
+      }
+    }
+
+    const expSearch = $("search-viewport").querySelector(".search-block.expanded");
+    if (expSearch) {
+      if ((e.ctrlKey || e.metaKey) && e.code === "KeyC" && selectionInsideEl(expSearch)) {
+        return;
+      }
+      if (!expSearch.contains(e.target) || e.key === "Escape") {
+        if (!$("ctx-menu").classList.contains("open")) {
+          collapseSearchBlock(expSearch);
+        }
+      }
+    }
+  }, true);
+
+  /* Custom Antigravity-style Context Menu */
+  let ctxTarget = null;
+  let ctxCapturedSel = "";
+
+  function isFormTextTarget(el) {
+    return el instanceof HTMLInputElement || el instanceof HTMLTextAreaElement;
+  }
+
+  function getElementSelectedText(el) {
+    if (!el) return "";
+    if (isFormTextTarget(el)) {
+      const start = el.selectionStart || 0;
+      const end = el.selectionEnd || 0;
+      return end > start ? el.value.slice(start, end) : "";
+    }
+    const sel = window.getSelection();
+    if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return "";
+    const range = sel.getRangeAt(0);
+    if (!el.contains(range.commonAncestorContainer) && !range.intersectsNode(el)) {
+      return "";
+    }
+    return sel.toString();
+  }
+
+  function closeCtxMenu() {
+    $("ctx-menu").classList.remove("open");
+    ctxTarget = null;
+    ctxCapturedSel = "";
+  }
+
+  function replaceTargetSelection(el, text) {
+    el.focus();
+    const ok = document.execCommand && document.execCommand("insertText", false, text);
+    if (!ok) {
+      const start = el.selectionStart || 0;
+      const end = el.selectionEnd || 0;
+      el.setRangeText(text, start, end, "end");
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }
+
+  function openCtxMenu(target, x, y) {
+    hideTip(true);
+    ctxTarget = target;
+    ctxCapturedSel = getElementSelectedText(target);
+    const menu = $("ctx-menu");
+    const isForm = isFormTextTarget(target);
+    const hasSel = Boolean(ctxCapturedSel);
+    const isReadonly = !isForm || Boolean(target.readOnly);
+    const hasContent = isForm ? Boolean(target.value) : Boolean(target.textContent);
+    menu.querySelector('[data-act="cut"]').disabled = !hasSel || isReadonly;
+    menu.querySelector('[data-act="copy"]').disabled = !hasSel;
+    menu.querySelector('[data-act="paste"]').disabled = isReadonly;
+    menu.querySelector('[data-act="selectAll"]').disabled = !hasContent;
+
+    menu.classList.add("open");
+    const mw = menu.offsetWidth || 88;
+    const mh = menu.offsetHeight || 124;
+    const left = Math.max(6, Math.min(x, window.innerWidth - mw - 6));
+    const top = Math.max(6, Math.min(y, window.innerHeight - mh - 6));
+    menu.style.left = left + "px";
+    menu.style.top = top + "px";
+  }
+
+  function attachCtxMenu(el) {
+    if (!el || el._hasCtxMenu) return;
+    el._hasCtxMenu = true;
+    el.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      if (el.id === "notes-input") {
+        if (state.notes.cards.length > 0 && !state.notes.topExpanded) {
+          expandTopNotesCard(true);
+        }
+      } else if (el.classList.contains("block-editor")) {
+        const card = el.closest(".note-block");
+        if (card && !card.classList.contains("expanded")) {
+          expandNoteCard(card, true);
+        }
+      } else if (el.classList.contains("search-body")) {
+        const card = el.closest(".search-block");
+        if (card && !card.classList.contains("expanded")) {
+          expandSearchBlock(card);
+        }
+      }
+      openCtxMenu(el, e.clientX, e.clientY);
+    });
+  }
+
+  attachCtxMenu($("notes-input"));
+  attachCtxMenu($("in-at"));
+  attachCtxMenu($("search-input"));
+
+  $("ctx-menu").addEventListener("mousedown", (e) => {
+    e.preventDefault();
+  });
+
+  $("ctx-menu").addEventListener("click", async (e) => {
+    const btn = e.target.closest(".ctx-item");
+    if (!btn || btn.disabled || !ctxTarget) return;
+    const target = ctxTarget;
+    const captured = ctxCapturedSel;
+    const act = btn.dataset.act;
+    closeCtxMenu();
+
+    if (!isFormTextTarget(target)) {
+      const textToCopy = captured || getElementSelectedText(target);
+      if (act === "copy" && textToCopy) {
+        await copyPlainText(textToCopy);
+      } else if (act === "selectAll") {
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        const sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      return;
+    }
+
+    target.focus();
+    const start = target.selectionStart || 0;
+    const end = target.selectionEnd || 0;
+    const selected = target.value.slice(start, end);
+
+    if (act === "cut" && selected) {
+      try {
+        await navigator.clipboard.writeText(selected);
+      } catch (_) {
+        document.execCommand("copy");
+      }
+      const deleted = document.execCommand && document.execCommand("delete");
+      if (!deleted) {
+        target.setRangeText("", start, end, "start");
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    } else if (act === "copy" && selected) {
+      try {
+        await navigator.clipboard.writeText(selected);
+      } catch (_) {
+        document.execCommand("copy");
+      }
+    } else if (act === "paste") {
+      try {
+        const clip = await navigator.clipboard.readText();
+        if (clip !== undefined && clip !== null) {
+          replaceTargetSelection(target, clip);
+        }
+      } catch (_) {
+        document.execCommand("paste");
+      }
+    } else if (act === "selectAll") {
+      target.select();
+    }
+  });
+
+  document.addEventListener("mousedown", (e) => {
+    if (!e.target.closest("#ctx-menu")) {
+      closeCtxMenu();
+    }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key === "Escape") closeCtxMenu();
+  });
+
+  function render(d) {
+    const conv = currentConv();
+    const key = convKey(conv);
+    const isConvSwitch = state.settingsLoadedForConv !== key;
+    const isNewConv = state.anim.conv !== key;
+    if (isConvSwitch && state.settingsLoadedForConv !== null && hasPendingSettingsChange()) {
+      const prevConv = state.settingsLoadedForConv === DRAFT_KEY ? "" : state.settingsLoadedForConv;
+      saveAutoSettings(prevConv);
+    }
+    state.lastData = d;
+    if (d.settings) {
+      state.settings = d.settings;
+      if (isConvSwitch) {
+        state.settingsDirty = false;
+      }
+      if (isConvSwitch || (!state.settingsDirty && !state.settingsSaving && document.activeElement !== $("in-at"))) {
+        $("in-auto").checked = Boolean(d.settings.auto_compact_enabled);
+        $("in-at").value = Math.round((d.settings.auto_compact_threshold || 250000) / 1000);
+        syncThresholdWidth();
+        state.settingsLoadedForConv = key;
+      }
+    }
+
+    syncNotesConv(conv);
+    if (state.notes.mode === "search" && state.search.conv !== conv) {
+      if (state.search.query.trim()) {
+        runChatSearch();
+      } else {
+        state.search.conv = conv;
+        renderSearchResults("");
+      }
+    }
+
+    if (isConvSwitch) {
+      clearUndoDone();
+    }
+
+    if (d.status !== "ok") {
+      clearCompactPending();
+      stopWorkingCompactBtn();
+      syncBarFlow(false, false);
+      animateMeterTo(key, 0, 0, false);
+      updateAutoPin(isNewConv);
+      $("first-ts").textContent = "—";
+      $("last-ts").textContent = "—";
+      $("msgs").textContent = "0";
+      const cs = $("compact-state");
+      cs.className = "compact-state";
+      cs.textContent = "Not compacted";
+      if (!state.undoDone) {
+        $("undo-compact-btn").classList.remove("visible");
+      }
+      evaluateAutoCompact(d);
+      setCompactBtnStatus();
+      return;
+    }
+
+    if (d.compact_in_flight) {
+      clearCompactPending();
+      startWorkingCompactBtn();
+    } else if (d.just_compressed) {
+      clearCompactPending();
+      if (state.compactingActive) {
+        stopWorkingCompactBtn();
+        setCompactBtnStatus("Done!", "is-ok", 2000, "", true);
+      }
+    } else if (!state.compactPending && state.compactingActive && !d.is_busy) {
+      stopWorkingCompactBtn();
+      setCompactBtnStatus();
+    }
+
+    const tokens = d.context_tokens || 0;
+    const deltaTokens = d.delta_tokens || 0;
+    const hasDelta = Boolean(d.has_delta);
+
+    syncBarFlow(d.is_busy, d.compact_in_flight || state.compactingActive);
+
+    animateMeterTo(key, tokens, deltaTokens, hasDelta);
+    updateAutoPin(isNewConv);
+
+    $("first-ts").textContent = fmtDateTime(d.first_message_at);
+    $("last-ts").textContent = fmtDateTime(d.last_message_at);
+
+    $("msgs").textContent = fmt(d.user_messages || 0);
+
+    const cs = $("compact-state");
+    const cpCount = d.checkpoint_count || 0;
+    if (cpCount > 0) {
+      cs.className = "compact-state yes";
+      cs.textContent = cpCount > 1 ? "Compacted ×" + cpCount : "Compacted";
+    } else {
+      cs.className = "compact-state";
+      cs.textContent = "Not compacted";
+    }
+
+    const canUndo =
+      d.undo_step_index !== null &&
+      d.undo_step_index !== undefined &&
+      !d.is_busy &&
+      !d.compact_in_flight;
+    if (canUndo) {
+      preloadNativeDoneSound();
+    }
+    if (state.undoDone) {
+      $("undo-compact-btn").classList.add("visible", "is-done");
+    } else if (!state.undoInFlight) {
+      $("undo-compact-btn").classList.toggle("visible", canUndo);
+    }
+
+    evaluateAutoCompact(d);
+    refreshCompactBtnDisabled();
+  }
+
+  async function poll() {
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    const myGen = ++state.pollGen;
+    const conv = currentConv();
+    const aborter = typeof AbortController === "function" ? new AbortController() : null;
+    const timeoutId = aborter ? setTimeout(() => {
+      try { aborter.abort(); } catch (_) {}
+    }, 8000) : null;
+    try {
+      const q = new URLSearchParams();
+      if (conv) q.set("conversationId", conv);
+      if (state.etag) q.set("etag", state.etag);
+      const opts = { method: "GET" };
+      if (aborter) opts.signal = aborter.signal;
+      const res = await apiFetch("/api/context?" + q.toString(), opts);
+      if (!res.ok) throw new Error("HTTP " + res.status);
+      const data = await res.json();
+      if (myGen !== state.pollGen) return;
+      if (state.hadNetError) {
+        state.hadNetError = false;
+        $("total").style.opacity = "1";
+      }
+      if (!data.unchanged) {
+        state.etag = data.etag || "";
+        render(data);
+      }
+    } catch (err) {
+      if (myGen !== state.pollGen) return;
+      state.hadNetError = true;
+      $("total").style.opacity = "0.55";
+      syncBarFlow(false, false);
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+      if (myGen === state.pollGen) {
+        const delay = document.hidden ? 4000 : (state.lastData && state.lastData.is_busy ? 600 : 1200);
+        state.timer = setTimeout(poll, delay);
+      }
+    }
+  }
+
+  window.addEventListener("blur", () => {
+    hideTip(true);
+    closeCtxMenu();
+    cancelAllDeleteConfirms();
+    collapseTopNotesCard(true);
+    collapseAllNoteCards();
+    collapseAllSearchBlocks();
+    if (Date.now() >= state.keepAboutUntil) {
+      setAboutOpen(false);
+    }
+    commitSettingsIfNeeded();
+    flushNoteSave();
+  });
+  window.addEventListener("pagehide", () => {
+    commitSettingsIfNeeded();
+    flushNoteSave({ keepalive: true });
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) {
+      hideTip(true);
+      closeCtxMenu();
+      cancelAllDeleteConfirms();
+      collapseTopNotesCard(true);
+      collapseAllNoteCards();
+      collapseAllSearchBlocks();
+      if (Date.now() >= state.keepAboutUntil) {
+        setAboutOpen(false);
+      }
+      commitSettingsIfNeeded();
+      flushNoteSave({ keepalive: true });
+    } else if (state.timer) {
+      clearTimeout(state.timer);
+      poll();
+    }
+  });
+
+  if (typeof ResizeObserver === "function") {
+    let lastW = 0;
+    let lastH = 0;
+    const wsEl = document.querySelector(".workspace-area");
+    if (wsEl) {
+      const wsRo = new ResizeObserver(() => {
+        const w = wsEl.clientWidth;
+        const h = wsEl.clientHeight;
+        if (!w || !h || (w === lastW && h === lastH)) return;
+        lastW = w;
+        lastH = h;
+        recalcVisibleCardsHeights();
+      });
+      wsRo.observe(wsEl);
+    }
+  }
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => recalcVisibleCardsHeights()).catch(() => {});
+  }
+
+  syncThresholdWidth();
+  syncNotesConv(currentConv());
+  poll();
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,74 @@
+# Changelog
+
+Track new features, improvements, and bug fixes in **Antimetro** for Google Antigravity App 2.0.
+
+---
+
+## v1.1.0
+
+**November 23, 2026**
+
+### Pinned Notes, All-Chats Search, Smart Ranking, and Native Tooltips
+
+This release adds animated pin-to-top note cards, cross-chat search across your local history, smarter multi-word search ranking that prioritizes exact phrases and close-proximity matches, reverse-flow compaction animation, and Antigravity-style pill tooltips. It includes **6 improvements**.
+
+### Improvements (6)
+
+- You can now **Pin** important note cards in **Notes** so they stay anchored at the top of the list even when new cards are created (`pinned` state persisted per chat in `notes/<conversationId>.json` with full backward compatibility), with flicker-free in-place accent border transitions and smooth animated reordering when moving cards up or down.
+- Added a **This** / **All** scope toggle inside **Search** to search prompts, replies, and compaction summaries either in the active conversation or across all recent local chats (up to `200` most recent transcripts), showing conversation titles and marking the active chat.
+- Upgraded multi-word **Search** with proximity-aware ranking and best-window snippets: exact phrases rank first, followed by matches where all search terms appear close together (within `160` characters), then scattered matches—sorted newest-first within each tier—while snippets and expanded excerpts automatically center on the tightest window containing all matched words.
+- The animated rainbow activity bar now reverses direction (flowing right-to-left) during compaction so it visually distinguishes context shrinking from normal generation.
+- Replaced native browser tooltips across the side panel with crisp Antigravity-style pill tooltips that follow the active light/dark theme, stay within narrow panel bounds, and show truncated chat titles in `All` search only when needed.
+- Improved **Search** responsiveness by immediately cancelling in-flight `All`-chats disk scans whenever you change the query or switch back to `This`, expanded the conversation title response cap to `8 MB`, and updated `plugin.json` version metadata, installers, and unit tests for `v1.1.0`.
+
+---
+
+## v1.0.1
+
+**November 23, 2026**
+
+### Multi-word Search, Notes Ergonomics, and Core Reliability
+
+This release brings multi-word out-of-order search, keyboard shortcuts, and visual card truncation cues, along with Linux `musl` portability and core reliability fixes. It includes **8 improvements** and **11 fixes**.
+
+### Improvements (8)
+
+- **Search** now matches multiple words in any order across a message (or exact phrases when wrapped in quotes `"..."`), highlighting every matched term.
+- You can now press `Ctrl+Enter` (`Cmd+Enter` on macOS) in the top **Notes** field to save the current note as a card below.
+- You can now press `Ctrl+F` (`Cmd+F` on macOS) anywhere inside the Antimetro panel to switch directly to **Search** and focus the search box.
+- Collapsed 5-line note cards now show a subtle bottom fade when a card contains additional lines of text inside.
+- Added visual status indicator and explanatory tooltips when a conversation reaches the per-chat note limit (`200` cards or `256 KB`).
+- Improved transcript search and live polling efficiency by filtering search matches on the fly without holding non-matching messages in memory and avoiding per-poll step vector clones.
+- Linux release binaries are now statically linked (`x86_64-unknown-linux-musl`) so they run out of the box on any Linux distribution regardless of the system `glibc` version.
+- Added smooth layout wrapping for narrow side panels, full `plugin.json` metadata (`version`, `author`, `homepage`, `repository`), and hardened loopback/header validation.
+
+### Fixes (11)
+
+- Fixed an issue where creating the first note card with `+` or returning to a conversation could render collapsed note cards as a single line (`22px`) instead of up to 5 lines.
+- Fixed an issue where note and search card heights did not recalculate when resizing the side panel horizontally or when loading a chat while the **Search** tab was active.
+- Fixed an issue where clicking **Undo** right after an automatic compaction could re-trigger **Auto-compact** 1 second later.
+- Fixed an issue where a transient error during **Auto-compact** in a conversation with no prior checkpoints could prevent **Auto-compact** from firing on subsequent turns.
+- Fixed an issue where clicking dots in the left dot-rail scrollbar could fail to scroll after switching chats, deleting/adding cards, or running a new search with the same dot count.
+- Fixed an issue where canceled (`Stop`) or errored agent steps could leave the progress bar animating in the busy state and keep **Compact now** / **Undo** disabled.
+- Fixed an issue where `/compact` commands carrying large metadata wrappers (`> 1 KB`) or preceded by `<CONTEXT_SUMMARY>` could be counted as regular user messages.
+- Fixed an issue where clicking directly from an expanded top note into a lower card could interrupt the top card's smooth collapse animation.
+- Fixed an issue on Windows where user profile paths containing apostrophes could break `Install.bat`, and removed the 1-second gap after `taskkill` so running Antigravity instances cannot lock `antimetro.exe` during updates or uninstallation.
+- Fixed an issue where theme auto-detection could miss light or dark mode if Antigravity provides `--background` as a computed `rgb(...)` value rather than a hex string.
+- Fixed an issue where exceeding `500` stored chats evicted a random chat instead of the oldest entry, ensured draft notes are deleted only after successful promotion to a new chat, and added `.json.bak` backups before resetting corrupted note or settings files.
+
+---
+
+## v1.0.0
+
+**November 22, 2026**
+
+### Initial Release
+
+First public release of **Antimetro** for Antigravity App 2.0 (tested on `v2.34.0`), built in pure Rust with zero external crates (`0` dependencies).
+
+- Live context window token counter (`cache_read_tokens + input_tokens`) with 3 semantic health zones (`0–200K` green, `200K–300K` amber, `300K–512K` red) and animated rainbow flow while the model is busy.
+- Full-session token delta (`+N / session` across tool calls and `-N / session` freed tokens right after compaction).
+- 1-click **Compact now** with active-turn and post-compaction lock plus 1-click **Undo** (`RevertToCascadeStep` with `conversationOnly: true`) and native Antigravity completion sound.
+- Per-chat **Auto-compact** (`Auto-compact after [ 250 ] K`) remembered individually for each conversation.
+- Per-chat **Notes** with Zed-style auto-save, standalone 5-line block cards (`+`), smooth click-to-expand editing, left dot-rail scrollbar, two-step delete confirmation, and empty-chat draft promotion.
+- In-chat **Search** across user prompts, model replies, and compaction summaries, including pre-compaction history (`before compact`).

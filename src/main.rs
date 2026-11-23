@@ -1,0 +1,4013 @@
+use std::collections::HashMap;
+use std::env;
+use std::fs::{self, File};
+use std::io::{BufRead, BufReader, Read, Seek, SeekFrom, Write};
+use std::net::{TcpListener, TcpStream};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::thread;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+const UI_HTML: &str = include_str!("ui.html");
+const FALLBACK_PRELOAD: &str = r#"(function(){const p=new URLSearchParams(location.search);const t=p.get('token');window.sidecar={conversationId:p.get('conversationId')||'',fetch:(u,o={})=>{const h=new Headers(o.headers||{});if(o.method&&o.method!=='GET')h.set('Content-Type','application/json');if(t)h.set('X-Sidecar-Token',t);return fetch(u,{...o,headers:h});}};})();"#;
+
+const MAX_AUTO_COMPACT_TOKENS: u64 = 500_000;
+const MIN_AUTO_COMPACT_TOKENS: u64 = 10_000;
+const MAX_STORED_CHATS: usize = 500;
+const MAX_REVERT_CUTOFFS: usize = 200;
+const MAX_ACTIVE_CONNECTIONS: usize = 32;
+const MAX_NOTE_BYTES: usize = 256 * 1024;
+const MAX_NOTE_CARDS: usize = 200;
+const MAX_SEARCH_RESULTS: usize = 60;
+const MAX_ALL_SEARCH_CHATS: usize = 200;
+const MAX_SEARCH_TEXT_CHARS: usize = 12_000;
+const SEARCH_CLOSE_SPAN_CHARS: usize = 160;
+const MAX_BODY_BYTES: usize = 512 * 1024;
+const DRAFT_CONV_ID: &str = "__draft__";
+
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+struct NoteCard {
+    id: u64,
+    text: String,
+    pinned: bool,
+}
+
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
+struct NotesData {
+    draft: String,
+    cards: Vec<NoteCard>,
+    next_id: u64,
+}
+
+impl NotesData {
+    fn is_empty(&self) -> bool {
+        self.draft.is_empty() && self.cards.is_empty()
+    }
+
+    fn to_json(&self) -> String {
+        let mut out = String::from(r#"{"draft":""#);
+        out.push_str(&json_escape(&self.draft));
+        out.push_str(r#"","cards":["#);
+        for (idx, card) in self.cards.iter().enumerate() {
+            if idx > 0 {
+                out.push(',');
+            }
+            out.push_str(&format!(
+                r#"{{"id":{},"text":"{}","pinned":{}}}"#,
+                card.id,
+                json_escape(&card.text),
+                card.pinned
+            ));
+        }
+        out.push_str(&format!(r#"],"next_id":{}}}"#, self.next_id.max(1)));
+        out
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+struct Settings {
+    auto_compact_enabled: bool,
+    auto_compact_threshold: u64,
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            auto_compact_enabled: false,
+            auto_compact_threshold: 250_000,
+        }
+    }
+}
+
+impl Settings {
+    fn to_json(self) -> String {
+        format!(
+            r#"{{"auto_compact_enabled":{},"auto_compact_threshold":{}}}"#,
+            self.auto_compact_enabled, self.auto_compact_threshold
+        )
+    }
+
+    fn validate(self) -> Result<(), &'static str> {
+        if self.auto_compact_threshold < MIN_AUTO_COMPACT_TOKENS
+            || self.auto_compact_threshold > MAX_AUTO_COMPACT_TOKENS
+        {
+            return Err("Auto-compact threshold must be between 10K and 500K.");
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct RevertCutoff {
+    bytes_len: u64,
+    max_step: u64,
+}
+
+struct SettingsStore {
+    chats: HashMap<String, Settings>,
+    chat_order: Vec<String>,
+    draft: Settings,
+    draft_updated_at: u64,
+    has_pending_draft: bool,
+    cutoffs: HashMap<String, RevertCutoff>,
+    cutoff_order: Vec<String>,
+    rev: u64,
+    path: PathBuf,
+}
+
+impl SettingsStore {
+    fn get_for_chat(&self, conv: &str) -> Settings {
+        if is_draft_conv(conv) {
+            return self.draft;
+        }
+        self.chats.get(conv).copied().unwrap_or_default()
+    }
+
+    fn insert_chat(&mut self, conv: String, settings: Settings) {
+        if let Some(pos) = self.chat_order.iter().position(|k| k == &conv) {
+            self.chat_order.remove(pos);
+        } else if !self.chats.contains_key(&conv) && self.chats.len() >= MAX_STORED_CHATS {
+            while self.chats.len() >= MAX_STORED_CHATS {
+                if !self.chat_order.is_empty() {
+                    let old = self.chat_order.remove(0);
+                    self.chats.remove(&old);
+                } else if let Some(any_key) = self.chats.keys().next().cloned() {
+                    self.chats.remove(&any_key);
+                } else {
+                    break;
+                }
+            }
+        }
+        self.chat_order.push(conv.clone());
+        self.chats.insert(conv, settings);
+    }
+
+    fn insert_cutoff(&mut self, conv: String, cutoff: RevertCutoff) {
+        if let Some(pos) = self.cutoff_order.iter().position(|k| k == &conv) {
+            self.cutoff_order.remove(pos);
+        } else if !self.cutoffs.contains_key(&conv) && self.cutoffs.len() >= MAX_REVERT_CUTOFFS {
+            while self.cutoffs.len() >= MAX_REVERT_CUTOFFS {
+                if !self.cutoff_order.is_empty() {
+                    let old = self.cutoff_order.remove(0);
+                    self.cutoffs.remove(&old);
+                } else if let Some(any_key) = self.cutoffs.keys().next().cloned() {
+                    self.cutoffs.remove(&any_key);
+                } else {
+                    break;
+                }
+            }
+        }
+        self.cutoff_order.push(conv.clone());
+        self.cutoffs.insert(conv, cutoff);
+    }
+}
+
+#[derive(Default, Clone)]
+struct ChatScanSummary {
+    user_messages: u64,
+    model_messages: u64,
+    checkpoint_count: u64,
+    last_checkpoint_step: u64,
+    undo_step_index: Option<u64>,
+    compact_in_flight: bool,
+    first_message_at: String,
+    last_message_at: String,
+    has_context_data: bool,
+    context_tokens: u64,
+    latest_step_index: u64,
+    has_delta: bool,
+    delta_tokens: i64,
+    just_compressed: bool,
+    is_busy: bool,
+    turn_finished: bool,
+}
+
+#[derive(Default, Clone)]
+struct ChatScanState {
+    offset: u64,
+    cutoff_applied: Option<RevertCutoff>,
+    steps: Vec<StepMetrics>,
+    user_messages: u64,
+    model_messages: u64,
+    checkpoint_count: u64,
+    last_checkpoint_step: u64,
+    last_non_compact_step: Option<u64>,
+    undo_step_index: Option<u64>,
+    compact_in_flight: bool,
+    first_message_at: String,
+    last_message_at: String,
+    has_context_data: bool,
+    context_tokens: u64,
+    latest_step_index: u64,
+    session_baseline_tokens: Option<u64>,
+    has_delta: bool,
+    delta_tokens: i64,
+    just_compressed: bool,
+    is_busy: bool,
+    turn_finished: bool,
+}
+
+impl ChatScanState {
+    fn to_summary(&self) -> ChatScanSummary {
+        ChatScanSummary {
+            user_messages: self.user_messages,
+            model_messages: self.model_messages,
+            checkpoint_count: self.checkpoint_count,
+            last_checkpoint_step: self.last_checkpoint_step,
+            undo_step_index: self.undo_step_index,
+            compact_in_flight: self.compact_in_flight,
+            first_message_at: self.first_message_at.clone(),
+            last_message_at: self.last_message_at.clone(),
+            has_context_data: self.has_context_data,
+            context_tokens: self.context_tokens,
+            latest_step_index: self.latest_step_index,
+            has_delta: self.has_delta,
+            delta_tokens: self.delta_tokens,
+            just_compressed: self.just_compressed,
+            is_busy: self.is_busy,
+            turn_finished: self.turn_finished,
+        }
+    }
+}
+
+struct ActiveConnGuard(Arc<AtomicUsize>);
+
+impl Drop for ActiveConnGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum StepKind {
+    #[default]
+    Other,
+    UserInput,
+    PlannerResponse,
+    Checkpoint,
+    SystemMessage,
+    Generic,
+    ErrorMessage,
+}
+
+impl StepKind {
+    fn from_str(s: &str) -> Self {
+        match s {
+            "USER_INPUT" => Self::UserInput,
+            "PLANNER_RESPONSE" => Self::PlannerResponse,
+            "CHECKPOINT" => Self::Checkpoint,
+            "SYSTEM_MESSAGE" => Self::SystemMessage,
+            "GENERIC" => Self::Generic,
+            "ERROR_MESSAGE" => Self::ErrorMessage,
+            _ => Self::Other,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum StepStatus {
+    #[default]
+    Other,
+    Done,
+    Running,
+    FailedOrCancelled,
+}
+
+impl StepStatus {
+    fn from_str(s: &str) -> Self {
+        match s {
+            "DONE" => Self::Done,
+            "RUNNING" | "IN_PROGRESS" | "PENDING" => Self::Running,
+            "ERROR" | "CANCELLED" | "CANCELED" | "FAILED" | "ABORTED" => Self::FailedOrCancelled,
+            _ => Self::Other,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct AppState {
+    app_data: PathBuf,
+    notes_dir: PathBuf,
+    token: Option<String>,
+    default_conv: Option<String>,
+    ls_address: Option<String>,
+    csrf_token: Option<String>,
+    preload_js: String,
+    settings: Arc<Mutex<SettingsStore>>,
+    notes_lock: Arc<Mutex<()>>,
+    cache: Arc<Mutex<HashMap<String, (String, String)>>>,
+    scans: Arc<Mutex<HashMap<String, ChatScanState>>>,
+    chat_titles: Arc<Mutex<(u64, HashMap<String, String>)>>,
+    search_gen: Arc<AtomicUsize>,
+    done_sound_mp3: Arc<OnceLock<Vec<u8>>>,
+    active_conns: Arc<AtomicUsize>,
+}
+
+#[derive(Default, Clone)]
+struct StepMetrics {
+    step_index: u64,
+    kind: StepKind,
+    status: StepStatus,
+    created_at: String,
+    input_tokens: u64,
+    cache_read_tokens: u64,
+    output_tokens: u64,
+    has_tokens: bool,
+    has_content: bool,
+    has_tool_calls: bool,
+    has_error: bool,
+    is_compact_cmd: bool,
+}
+
+impl StepMetrics {
+    fn is_failed(&self) -> bool {
+        self.has_error
+            || self.status == StepStatus::FailedOrCancelled
+            || self.kind == StepKind::ErrorMessage
+    }
+}
+
+fn main() {
+    let port: u16 = env::var("ANTIGRAVITY_SIDECAR_WEB_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(18765);
+
+    let token = env::var("ANTIGRAVITY_SIDECAR_UI_TOKEN")
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    let default_conv = env::var("ANTIGRAVITY_CONVERSATION_ID")
+        .ok()
+        .filter(|s| !s.is_empty());
+
+    let ls_address = env::var("ANTIGRAVITY_LS_ADDRESS")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+
+    let csrf_token = env::var("ANTIGRAVITY_CSRF_TOKEN")
+        .ok()
+        .filter(|s| !s.trim().is_empty());
+
+    let app_data = resolve_app_data();
+    let data_dir = resolve_data_dir(&app_data);
+    let settings_path = data_dir.join("settings.json");
+    let notes_dir = data_dir.join("notes");
+    let loaded = load_settings_store_data(&settings_path);
+    let draft_note_exists = note_path_for(&notes_dir, DRAFT_CONV_ID).is_some_and(|p| p.exists());
+    let has_pending_draft = loaded.draft != Settings::default() || draft_note_exists;
+    let preload_js = load_preload_js();
+
+    let state = Arc::new(AppState {
+        app_data,
+        notes_dir,
+        token,
+        default_conv,
+        ls_address,
+        csrf_token,
+        preload_js,
+        settings: Arc::new(Mutex::new(SettingsStore {
+            chats: loaded.chats,
+            chat_order: loaded.chat_order,
+            draft: loaded.draft,
+            draft_updated_at: loaded.draft_updated_at,
+            has_pending_draft,
+            cutoffs: loaded.cutoffs,
+            cutoff_order: loaded.cutoff_order,
+            rev: 1,
+            path: settings_path,
+        })),
+        notes_lock: Arc::new(Mutex::new(())),
+        cache: Arc::new(Mutex::new(HashMap::new())),
+        scans: Arc::new(Mutex::new(HashMap::new())),
+        chat_titles: Arc::new(Mutex::new((0, HashMap::new()))),
+        search_gen: Arc::new(AtomicUsize::new(0)),
+        done_sound_mp3: Arc::new(OnceLock::new()),
+        active_conns: Arc::new(AtomicUsize::new(0)),
+    });
+
+    let listener = TcpListener::bind(("127.0.0.1", port))
+        .unwrap_or_else(|e| panic!("Failed to bind 127.0.0.1:{port}: {e}"));
+
+    let bound_port = listener.local_addr().map(|a| a.port()).unwrap_or(port);
+    println!("[sidecar] listening on 127.0.0.1:{bound_port}");
+    let _ = std::io::stdout().flush();
+
+    for stream in listener.incoming().flatten() {
+        let acquired = state
+            .active_conns
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
+                (c < MAX_ACTIVE_CONNECTIONS).then_some(c + 1)
+            })
+            .is_ok();
+        if !acquired {
+            continue;
+        }
+        let st = Arc::clone(&state);
+        thread::spawn(move || {
+            let _guard = ActiveConnGuard(Arc::clone(&st.active_conns));
+            handle_client(stream, &st);
+        });
+    }
+}
+
+fn home_dir() -> PathBuf {
+    env::var_os("USERPROFILE")
+        .or_else(|| env::var_os("HOME"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn resolve_app_data() -> PathBuf {
+    if let Ok(exec_data) = env::var("ANTIGRAVITY_EXECUTABLE_DATA_DIR") {
+        let mut p = PathBuf::from(exec_data);
+        for _ in 0..8 {
+            if p.file_name().and_then(|n| n.to_str()) == Some("sidecar_data") {
+                if let Some(parent) = p.parent() {
+                    return parent.to_path_buf();
+                }
+            }
+            if !p.pop() {
+                break;
+            }
+        }
+    }
+    home_dir().join(".gemini").join("antigravity")
+}
+
+fn resolve_data_dir(app_data: &Path) -> PathBuf {
+    if let Ok(exec_data) = env::var("ANTIGRAVITY_EXECUTABLE_DATA_DIR") {
+        if !exec_data.trim().is_empty() {
+            return PathBuf::from(exec_data);
+        }
+    }
+    app_data.join("sidecar_data").join("antimetro")
+}
+
+#[cfg(unix)]
+fn set_unix_private_dir_perms(dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(dir, fs::Permissions::from_mode(0o700));
+}
+
+#[cfg(not(unix))]
+fn set_unix_private_dir_perms(_dir: &Path) {}
+
+#[cfg(unix)]
+fn set_unix_private_file_perms(file: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(file, fs::Permissions::from_mode(0o600));
+}
+
+#[cfg(not(unix))]
+fn set_unix_private_file_perms(_file: &Path) {}
+
+fn atomic_write_file(path: &Path, bytes: &[u8], tmp_ext: &str) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+        set_unix_private_dir_perms(parent);
+    }
+    let tmp_path = path.with_extension(tmp_ext);
+    fs::write(&tmp_path, bytes)?;
+    set_unix_private_file_perms(&tmp_path);
+
+    for attempt in 0..3 {
+        if fs::rename(&tmp_path, path).is_ok() {
+            set_unix_private_file_perms(path);
+            return Ok(());
+        }
+        if attempt < 2 {
+            thread::sleep(Duration::from_millis(15));
+        }
+    }
+
+    let res = fs::write(path, bytes);
+    if res.is_ok() {
+        set_unix_private_file_perms(path);
+    }
+    let _ = fs::remove_file(&tmp_path);
+    res
+}
+
+fn backup_corrupt_file(path: &Path) {
+    let bak = path.with_extension("json.bak");
+    let _ = fs::copy(path, &bak);
+    set_unix_private_file_perms(&bak);
+}
+
+#[derive(Default)]
+struct LoadedStoreData {
+    chats: HashMap<String, Settings>,
+    chat_order: Vec<String>,
+    draft: Settings,
+    draft_updated_at: u64,
+    cutoffs: HashMap<String, RevertCutoff>,
+    cutoff_order: Vec<String>,
+}
+
+fn is_draft_conv(conv: &str) -> bool {
+    conv.is_empty() || conv == DRAFT_CONV_ID
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+fn transcript_path(app_data: &Path, conv: &str) -> PathBuf {
+    app_data
+        .join("brain")
+        .join(conv)
+        .join(".system_generated")
+        .join("logs")
+        .join("transcript_full.jsonl")
+}
+
+fn load_settings_store_data(path: &Path) -> LoadedStoreData {
+    let Ok(raw) = fs::read(path) else {
+        return LoadedStoreData::default();
+    };
+    if trim_ascii(&raw).is_empty() {
+        return LoadedStoreData::default();
+    }
+    match parse_settings_store_data(&raw) {
+        Some(d) => d,
+        None => {
+            backup_corrupt_file(path);
+            LoadedStoreData::default()
+        }
+    }
+}
+
+fn save_settings_store(store: &SettingsStore) -> std::io::Result<()> {
+    let mut out = String::from("{\"chats\":{");
+    let mut first_chat = true;
+    for conv in &store.chat_order {
+        if let Some(s) = store.chats.get(conv) {
+            if !first_chat {
+                out.push(',');
+            }
+            first_chat = false;
+            out.push('"');
+            out.push_str(&json_escape(conv));
+            out.push_str("\":");
+            out.push_str(&s.to_json());
+        }
+    }
+    for (conv, s) in &store.chats {
+        if !store.chat_order.iter().any(|k| k == conv) {
+            if !first_chat {
+                out.push(',');
+            }
+            first_chat = false;
+            out.push('"');
+            out.push_str(&json_escape(conv));
+            out.push_str("\":");
+            out.push_str(&s.to_json());
+        }
+    }
+    out.push_str("},\"draft\":{\"auto_compact_enabled\":");
+    out.push_str(if store.draft.auto_compact_enabled { "true" } else { "false" });
+    out.push_str(",\"auto_compact_threshold\":");
+    out.push_str(&store.draft.auto_compact_threshold.to_string());
+    out.push_str(",\"updated_at\":");
+    out.push_str(&store.draft_updated_at.to_string());
+    out.push_str("},\"cutoffs\":{");
+    let mut first_cutoff = true;
+    for conv in &store.cutoff_order {
+        if let Some(c) = store.cutoffs.get(conv) {
+            if !first_cutoff {
+                out.push(',');
+            }
+            first_cutoff = false;
+            out.push('"');
+            out.push_str(&json_escape(conv));
+            out.push_str(&format!(
+                "\":{{\"bytes_len\":{},\"max_step\":{}}}",
+                c.bytes_len, c.max_step
+            ));
+        }
+    }
+    for (conv, c) in &store.cutoffs {
+        if !store.cutoff_order.iter().any(|k| k == conv) {
+            if !first_cutoff {
+                out.push(',');
+            }
+            first_cutoff = false;
+            out.push('"');
+            out.push_str(&json_escape(conv));
+            out.push_str(&format!(
+                "\":{{\"bytes_len\":{},\"max_step\":{}}}",
+                c.bytes_len, c.max_step
+            ));
+        }
+    }
+    out.push_str("}}");
+
+    atomic_write_file(&store.path, out.as_bytes(), "json.tmp")
+}
+
+fn load_preload_js() -> String {
+    let sdk_path = home_dir()
+        .join(".gemini")
+        .join("config")
+        .join("node_modules")
+        .join("sidecar_sdk")
+        .join("preload.js");
+    fs::read_to_string(sdk_path).unwrap_or_else(|_| FALLBACK_PRELOAD.to_string())
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (&x, &y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+fn is_loopback_host_authority(host_val: &str) -> bool {
+    let h = host_val.trim();
+    if h.is_empty() || h.bytes().any(|b| b == b'\r' || b == b'\n' || b == b' ') {
+        return false;
+    }
+    if let Some(rest) = h.strip_prefix("[::1]") {
+        return rest.is_empty()
+            || rest
+                .strip_prefix(':')
+                .is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    }
+    let host_only = match h.split_once(':') {
+        Some((host, port)) => {
+            if port.is_empty() || !port.bytes().all(|b| b.is_ascii_digit()) {
+                return false;
+            }
+            host
+        }
+        None => h,
+    };
+    host_only == "127.0.0.1" || host_only.eq_ignore_ascii_case("localhost")
+}
+
+fn handle_client(mut stream: TcpStream, state: &AppState) {
+    let _ = stream.set_read_timeout(Some(Duration::from_secs(15)));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
+    let mut req_buf = Vec::with_capacity(2048);
+    let mut chunk = [0u8; 2048];
+
+    for _ in 0..120 {
+        let header_end = loop {
+            if let Some(pos) = find_subslice(&req_buf, b"\r\n\r\n") {
+                break pos;
+            }
+            if req_buf.len() > 32768 {
+                send_response(&mut stream, 413, "text/plain", b"Header Too Large", false);
+                return;
+            }
+            match stream.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(n) => req_buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return,
+            }
+        };
+
+        let head = String::from_utf8_lossy(&req_buf[..header_end]).into_owned();
+        let mut lines = head.split("\r\n");
+        let first_line = match lines.next() {
+            Some(l) if !l.is_empty() => l,
+            _ => return,
+        };
+
+        let mut parts = first_line.split_whitespace();
+        let method = parts.next().unwrap_or("GET");
+        let target = parts.next().unwrap_or("/");
+
+        let mut header_token: Option<String> = None;
+        let mut host_header: Option<String> = None;
+        let mut content_length: usize = 0;
+        let mut has_content_length = false;
+        let mut wants_close = false;
+
+        for line in lines {
+            if let Some((k, v)) = line.split_once(':') {
+                let key = k.trim();
+                let val = v.trim();
+                if key.eq_ignore_ascii_case("x-sidecar-token") {
+                    header_token = Some(val.to_string());
+                } else if key.eq_ignore_ascii_case("host") {
+                    host_header = Some(val.to_string());
+                } else if key.eq_ignore_ascii_case("content-length") {
+                    let Ok(parsed_len) = val.parse::<usize>() else {
+                        send_response(
+                            &mut stream,
+                            400,
+                            "text/plain; charset=utf-8",
+                            b"Invalid Content-Length",
+                            false,
+                        );
+                        return;
+                    };
+                    if has_content_length && content_length != parsed_len {
+                        send_response(
+                            &mut stream,
+                            400,
+                            "text/plain; charset=utf-8",
+                            b"Conflicting Content-Length",
+                            false,
+                        );
+                        return;
+                    }
+                    content_length = parsed_len;
+                    has_content_length = true;
+                } else if key.eq_ignore_ascii_case("connection")
+                    && val.eq_ignore_ascii_case("close")
+                {
+                    wants_close = true;
+                }
+            }
+        }
+
+        if let Some(ref h) = host_header {
+            if !is_loopback_host_authority(h) {
+                send_response(
+                    &mut stream,
+                    403,
+                    "text/plain; charset=utf-8",
+                    b"Forbidden Host",
+                    false,
+                );
+                return;
+            }
+        }
+
+        if content_length > MAX_BODY_BYTES {
+            send_response(&mut stream, 413, "text/plain", b"Body Too Large", false);
+            return;
+        }
+
+        let body_start = header_end + 4;
+        let total_needed = body_start + content_length;
+        while req_buf.len() < total_needed {
+            match stream.read(&mut chunk) {
+                Ok(0) => return,
+                Ok(n) => req_buf.extend_from_slice(&chunk[..n]),
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => return,
+            }
+        }
+
+        let req_body = req_buf[body_start..total_needed].to_vec();
+        req_buf.drain(..total_needed);
+
+        let (path, query_str) = match target.split_once('?') {
+            Some((p, q)) => (p, q),
+            None => (target, ""),
+        };
+        let query = parse_query(query_str);
+
+        let is_public_asset = method == "OPTIONS"
+            || (method == "GET" && matches!(path, "/" | "/index.html" | "/preload.js"));
+
+        if !is_public_asset {
+            if let Some(expected) = &state.token {
+                let provided = header_token
+                    .as_deref()
+                    .or_else(|| query.get("token").map(String::as_str));
+                let authorized = provided
+                    .is_some_and(|p| constant_time_eq(p.as_bytes(), expected.as_bytes()));
+                if !authorized {
+                    send_response(
+                        &mut stream,
+                        401,
+                        "application/json; charset=utf-8",
+                        br#"{"error":"unauthorized"}"#,
+                        false,
+                    );
+                    return;
+                }
+            }
+        }
+
+        let keep_alive = !wants_close;
+
+        match (method, path) {
+            ("GET", "/") | ("GET", "/index.html") => {
+                send_response(
+                    &mut stream,
+                    200,
+                    "text/html; charset=utf-8",
+                    UI_HTML.as_bytes(),
+                    keep_alive,
+                );
+            }
+            ("GET", "/preload.js") => {
+                send_response(
+                    &mut stream,
+                    200,
+                    "application/javascript; charset=utf-8",
+                    state.preload_js.as_bytes(),
+                    keep_alive,
+                );
+            }
+            ("GET", "/api/settings") => {
+                let conv = query
+                    .get("conversationId")
+                    .map(String::as_str)
+                    .filter(|s| !s.is_empty())
+                    .or(state.default_conv.as_deref())
+                    .unwrap_or("");
+                maybe_promote_draft(state, conv);
+                let body = match state.settings.lock() {
+                    Ok(store) => format!(r#"{{"settings":{}}}"#, store.get_for_chat(conv).to_json()),
+                    Err(_) => r#"{"error":"lock failed"}"#.to_string(),
+                };
+                send_response(
+                    &mut stream,
+                    200,
+                    "application/json; charset=utf-8",
+                    body.as_bytes(),
+                    keep_alive,
+                );
+            }
+            ("POST", "/api/settings") => {
+                let (status, body) = handle_post_settings(state, &req_body);
+                send_response(
+                    &mut stream,
+                    status,
+                    "application/json; charset=utf-8",
+                    body.as_bytes(),
+                    keep_alive,
+                );
+            }
+            ("GET", "/api/notes") => {
+                let conv = query
+                    .get("conversationId")
+                    .map(String::as_str)
+                    .filter(|s| !s.is_empty())
+                    .or(state.default_conv.as_deref())
+                    .unwrap_or("");
+                let (status, body) = handle_get_notes(state, conv);
+                send_response(
+                    &mut stream,
+                    status,
+                    "application/json; charset=utf-8",
+                    body.as_bytes(),
+                    keep_alive,
+                );
+            }
+            ("POST", "/api/notes") => {
+                let (status, body) = handle_post_notes(state, &req_body);
+                send_response(
+                    &mut stream,
+                    status,
+                    "application/json; charset=utf-8",
+                    body.as_bytes(),
+                    keep_alive,
+                );
+            }
+            ("GET", "/api/search") => {
+                let conv = query
+                    .get("conversationId")
+                    .map(String::as_str)
+                    .filter(|s| !s.is_empty())
+                    .or(state.default_conv.as_deref())
+                    .unwrap_or("");
+                let q_text = query.get("q").map(String::as_str).unwrap_or("");
+                let scope = query.get("scope").map(String::as_str).unwrap_or("this");
+                let (status, body) = handle_get_search(state, conv, q_text, scope);
+                send_response(
+                    &mut stream,
+                    status,
+                    "application/json; charset=utf-8",
+                    body.as_bytes(),
+                    keep_alive,
+                );
+            }
+            ("POST", "/api/compact") => {
+                let (status, body) = handle_post_compact(state, &req_body);
+                send_response(
+                    &mut stream,
+                    status,
+                    "application/json; charset=utf-8",
+                    body.as_bytes(),
+                    keep_alive,
+                );
+            }
+            ("POST", "/api/undo-compact") => {
+                let (status, body) = handle_post_undo_compact(state, &req_body);
+                send_response(
+                    &mut stream,
+                    status,
+                    "application/json; charset=utf-8",
+                    body.as_bytes(),
+                    keep_alive,
+                );
+            }
+            ("GET", "/api/cascade-done.mp3") => {
+                match get_native_cascade_done_mp3(state) {
+                    Some(bytes) => {
+                        send_response(&mut stream, 200, "audio/mpeg", bytes, keep_alive);
+                    }
+                    None => {
+                        send_response(
+                            &mut stream,
+                            404,
+                            "text/plain; charset=utf-8",
+                            b"Not Found",
+                            keep_alive,
+                        );
+                    }
+                }
+            }
+            ("GET", "/api/context") => {
+                let conv = query
+                    .get("conversationId")
+                    .map(String::as_str)
+                    .filter(|s| !s.is_empty())
+                    .or(state.default_conv.as_deref())
+                    .unwrap_or("");
+                let req_etag = query.get("etag").map(String::as_str).unwrap_or("");
+                let body = build_context_json(state, conv, req_etag);
+                send_response(
+                    &mut stream,
+                    200,
+                    "application/json; charset=utf-8",
+                    body.as_bytes(),
+                    keep_alive,
+                );
+            }
+            ("POST", "/_sidecar/get-conversation-metadata") => {
+                send_response(
+                    &mut stream,
+                    200,
+                    "application/json; charset=utf-8",
+                    b"{}",
+                    keep_alive,
+                );
+            }
+            ("OPTIONS", _) => {
+                send_response(&mut stream, 204, "text/plain", b"", keep_alive);
+            }
+            _ => {
+                send_response(
+                    &mut stream,
+                    404,
+                    "text/plain; charset=utf-8",
+                    b"Not found",
+                    keep_alive,
+                );
+            }
+        }
+
+        if !keep_alive {
+            return;
+        }
+    }
+}
+
+fn count_user_messages_up_to(path: &Path, limit: u64) -> u64 {
+    let Ok(f) = File::open(path) else {
+        return 0;
+    };
+    let mut reader = BufReader::with_capacity(16 * 1024, f);
+    let mut buf = Vec::with_capacity(2048);
+    let mut count = 0u64;
+    loop {
+        buf.clear();
+        let Ok(n) = reader.read_until(b'\n', &mut buf) else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        let trimmed = trim_ascii(&buf);
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Some(m) = parse_line(trimmed) {
+            if m.kind == StepKind::UserInput && !m.is_compact_cmd {
+                count = count.saturating_add(1);
+                if count >= limit {
+                    return count;
+                }
+            }
+        }
+    }
+    count
+}
+
+fn maybe_promote_draft(state: &AppState, conv: &str) {
+    if is_draft_conv(conv) || !is_valid_conv_id(conv) {
+        return;
+    }
+
+    let should_try = match state.settings.lock() {
+        Ok(store) => store.has_pending_draft && !store.chats.contains_key(conv),
+        Err(_) => return,
+    };
+    if !should_try {
+        return;
+    }
+
+    let Ok(_notes_guard) = state.notes_lock.lock() else {
+        return;
+    };
+    let Ok(mut store) = state.settings.lock() else {
+        return;
+    };
+    if !store.has_pending_draft || store.chats.contains_key(conv) {
+        return;
+    }
+
+    let Some(target_note_path) = note_path_for(&state.notes_dir, conv) else {
+        return;
+    };
+    if target_note_path.exists() {
+        return;
+    }
+
+    let t_path = transcript_path(&state.app_data, conv);
+    if let Ok(meta) = fs::metadata(&t_path) {
+        let file_secs = meta
+            .created()
+            .ok()
+            .or_else(|| meta.modified().ok())
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        if store.draft_updated_at > 0 && file_secs < store.draft_updated_at.saturating_sub(5) {
+            return;
+        }
+        if meta.len() > 0 && count_user_messages_up_to(&t_path, 2) > 1 {
+            return;
+        }
+    }
+
+    let mut promoted = false;
+    if store.draft != Settings::default() {
+        let draft_settings = store.draft;
+        store.insert_chat(conv.to_string(), draft_settings);
+        store.draft = Settings::default();
+        promoted = true;
+    }
+
+    let mut notes_promoted_cleanly = true;
+    if let Some(draft_note_path) = note_path_for(&state.notes_dir, DRAFT_CONV_ID) {
+        if draft_note_path.exists() {
+            match read_notes_data(&state.notes_dir, DRAFT_CONV_ID) {
+                Ok(notes) if !notes.is_empty() => {
+                    if write_notes_data(&state.notes_dir, conv, &notes).is_ok() {
+                        promoted = true;
+                        let _ = fs::remove_file(&draft_note_path);
+                    } else {
+                        notes_promoted_cleanly = false;
+                    }
+                }
+                Ok(_) => {
+                    let _ = fs::remove_file(&draft_note_path);
+                }
+                Err(_) => {
+                    notes_promoted_cleanly = false;
+                }
+            }
+        }
+    }
+
+    if notes_promoted_cleanly {
+        store.draft_updated_at = 0;
+        store.has_pending_draft = false;
+    }
+    if promoted {
+        store.rev = store.rev.saturating_add(1);
+    }
+    let _ = save_settings_store(&store);
+}
+
+fn handle_post_settings(state: &AppState, body: &[u8]) -> (u16, String) {
+    let conv = parse_json_string_field(body, "conversationId")
+        .or_else(|| state.default_conv.clone())
+        .unwrap_or_default();
+
+    let is_draft = is_draft_conv(&conv);
+    if !is_draft && !is_valid_conv_id(&conv) {
+        return (
+            400,
+            r#"{"error":"Invalid conversation ID for settings"}"#.to_string(),
+        );
+    }
+
+    let _notes_guard = if is_draft {
+        match state.notes_lock.lock() {
+            Ok(g) => Some(g),
+            Err(_) => return (500, r#"{"error":"Internal lock error"}"#.to_string()),
+        }
+    } else {
+        None
+    };
+
+    let Ok(mut store) = state.settings.lock() else {
+        return (500, r#"{"error":"Internal lock error"}"#.to_string());
+    };
+
+    let mut next = store.get_for_chat(&conv);
+    if !parse_settings_patch(body, &mut next) {
+        return (400, r#"{"error":"Invalid settings payload"}"#.to_string());
+    }
+    if let Err(msg) = next.validate() {
+        return (400, format!(r#"{{"error":"{}"}}"#, json_escape(msg)));
+    }
+
+    if is_draft {
+        store.draft = next;
+        let draft_note_exists =
+            note_path_for(&state.notes_dir, DRAFT_CONV_ID).is_some_and(|p| p.exists());
+        let has_draft = next != Settings::default() || draft_note_exists;
+        store.has_pending_draft = has_draft;
+        store.draft_updated_at = if has_draft { unix_now_secs() } else { 0 };
+    } else {
+        store.insert_chat(conv, next);
+    }
+
+    if let Err(e) = save_settings_store(&store) {
+        return (
+            500,
+            format!(
+                r#"{{"error":"Failed to save settings: {}"}}"#,
+                json_escape(&e.to_string())
+            ),
+        );
+    }
+
+    store.rev = store.rev.saturating_add(1);
+    let json = format!(r#"{{"ok":true,"settings":{}}}"#, next.to_json());
+    (200, json)
+}
+
+fn note_path_for(notes_dir: &Path, conv: &str) -> Option<PathBuf> {
+    if conv == DRAFT_CONV_ID || is_valid_conv_id(conv) {
+        Some(notes_dir.join(format!("{conv}.json")))
+    } else {
+        None
+    }
+}
+
+fn read_notes_data(notes_dir: &Path, conv: &str) -> Result<NotesData, std::io::Error> {
+    let Some(path) = note_path_for(notes_dir, conv) else {
+        return Ok(NotesData {
+            next_id: 1,
+            ..Default::default()
+        });
+    };
+    match fs::read(&path) {
+        Ok(bytes) => {
+            if trim_ascii(&bytes).is_empty() {
+                return Ok(NotesData {
+                    next_id: 1,
+                    ..Default::default()
+                });
+            }
+            match parse_notes_data(&bytes) {
+                Some(data) => Ok(data),
+                None => {
+                    backup_corrupt_file(&path);
+                    Ok(NotesData {
+                        next_id: 1,
+                        ..Default::default()
+                    })
+                }
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(NotesData {
+            next_id: 1,
+            ..Default::default()
+        }),
+        Err(e) => Err(e),
+    }
+}
+
+fn write_notes_data(notes_dir: &Path, conv: &str, data: &NotesData) -> Result<(), String> {
+    let path = note_path_for(notes_dir, conv)
+        .ok_or_else(|| "No active conversation ID for notes".to_string())?;
+    if data.is_empty() {
+        match fs::remove_file(&path) {
+            Ok(()) => return Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(format!("Failed to clear notes: {e}")),
+        }
+    }
+    if data.cards.len() > MAX_NOTE_CARDS {
+        return Err(format!("Maximum {MAX_NOTE_CARDS} cards per chat reached."));
+    }
+    let json = data.to_json();
+    if json.len() > MAX_NOTE_BYTES {
+        return Err("Notes are too large (max 256 KB).".to_string());
+    }
+    atomic_write_file(&path, json.as_bytes(), "json.tmp")
+        .map_err(|e| format!("Failed to save notes: {e}"))
+}
+
+fn parse_notes_data(b: &[u8]) -> Option<NotesData> {
+    let mut data = NotesData {
+        next_id: 1,
+        ..Default::default()
+    };
+    let mut seen_known = false;
+    parse_json_object_entries(b, |k, v| match k.as_str() {
+        "draft" if v.first() == Some(&b'"') => {
+            let mut idx = 0;
+            if let Some(txt) = parse_string(v, &mut idx) {
+                data.draft = txt;
+                seen_known = true;
+            }
+        }
+        "cards" if v.first() == Some(&b'[') => {
+            parse_note_cards_array(v, &mut data.cards);
+            seen_known = true;
+        }
+        "next_id" => {
+            let mut idx = 0;
+            skip_ws(v, &mut idx);
+            if let Some(n) = parse_u64(v, &mut idx) {
+                data.next_id = n.max(1);
+                seen_known = true;
+            }
+        }
+        _ => {}
+    })?;
+    if !seen_known {
+        return None;
+    }
+    let max_card_id = data.cards.iter().map(|c| c.id).max().unwrap_or(0);
+    if data.next_id <= max_card_id {
+        data.next_id = max_card_id.saturating_add(1);
+    }
+    Some(data)
+}
+
+fn parse_note_cards_array(b: &[u8], cards: &mut Vec<NoteCard>) {
+    let mut i = 0;
+    skip_ws(b, &mut i);
+    if b.get(i) != Some(&b'[') {
+        return;
+    }
+    i += 1;
+    let mut auto_id: u64 = 1;
+    loop {
+        skip_ws(b, &mut i);
+        if b.get(i) == Some(&b']') {
+            return;
+        }
+        let start = i;
+        if skip_value(b, &mut i).is_none() {
+            return;
+        }
+        // Allow one extra card so POST can detect overflow and return HTTP 413
+        if cards.len() <= MAX_NOTE_CARDS {
+            let slice = &b[start..i];
+            if slice.first() == Some(&b'{') {
+                let mut id = 0u64;
+                let mut text = String::new();
+                let mut pinned = false;
+                let mut has_text = false;
+                let _ = parse_json_object_entries(slice, |k, v| {
+                    if k == "id" {
+                        let mut k_idx = 0;
+                        skip_ws(v, &mut k_idx);
+                        if let Some(n) = parse_u64(v, &mut k_idx) {
+                            id = n;
+                        }
+                    } else if k == "text" && v.first() == Some(&b'"') {
+                        let mut k_idx = 0;
+                        if let Some(t) = parse_string(v, &mut k_idx) {
+                            text = t;
+                            has_text = true;
+                        }
+                    } else if k == "pinned" {
+                        let mut k_idx = 0;
+                        skip_ws(v, &mut k_idx);
+                        if let Some(p) = parse_bool(v, &mut k_idx) {
+                            pinned = p;
+                        }
+                    }
+                });
+                if has_text {
+                    if id == 0 {
+                        id = auto_id;
+                    }
+                    auto_id = auto_id.max(id).saturating_add(1);
+                    cards.push(NoteCard { id, text, pinned });
+                }
+            }
+        }
+        skip_ws(b, &mut i);
+        match b.get(i) {
+            Some(&b',') => i += 1,
+            Some(&b']') => return,
+            _ => return,
+        }
+    }
+}
+
+fn handle_get_notes(state: &AppState, conv: &str) -> (u16, String) {
+    let target = if is_draft_conv(conv) {
+        DRAFT_CONV_ID
+    } else if is_valid_conv_id(conv) {
+        maybe_promote_draft(state, conv);
+        conv
+    } else {
+        return (400, r#"{"error":"Invalid conversation ID for notes"}"#.to_string());
+    };
+
+    let Ok(_guard) = state.notes_lock.lock() else {
+        return (500, r#"{"error":"Internal lock error"}"#.to_string());
+    };
+    match read_notes_data(&state.notes_dir, target) {
+        Ok(mut data) => {
+            if data.cards.len() > MAX_NOTE_CARDS {
+                data.cards.truncate(MAX_NOTE_CARDS);
+            }
+            (200, data.to_json())
+        }
+        Err(e) => (
+            500,
+            format!(r#"{{"error":"Failed to read notes: {}"}}"#, json_escape(&e.to_string())),
+        ),
+    }
+}
+
+fn handle_post_notes(state: &AppState, body: &[u8]) -> (u16, String) {
+    let conv = parse_json_string_field(body, "conversationId")
+        .or_else(|| state.default_conv.clone())
+        .unwrap_or_default();
+
+    let is_draft = is_draft_conv(&conv);
+    if !is_draft && !is_valid_conv_id(&conv) {
+        return (400, r#"{"error":"Invalid conversation ID for notes"}"#.to_string());
+    }
+    let target = if is_draft { DRAFT_CONV_ID } else { conv.as_str() };
+
+    let Some(data) = parse_notes_data(body) else {
+        return (400, r#"{"error":"Invalid notes payload"}"#.to_string());
+    };
+
+    if data.cards.len() > MAX_NOTE_CARDS {
+        return (
+            413,
+            format!(r#"{{"error":"Maximum {MAX_NOTE_CARDS} cards per chat reached."}}"#),
+        );
+    }
+
+    if data.to_json().len() > MAX_NOTE_BYTES {
+        return (
+            413,
+            r#"{"error":"Notes are too large (max 256 KB)."}"#.to_string(),
+        );
+    }
+
+    let Ok(_guard) = state.notes_lock.lock() else {
+        return (500, r#"{"error":"Internal lock error"}"#.to_string());
+    };
+
+    if let Err(msg) = write_notes_data(&state.notes_dir, target, &data) {
+        return (500, format!(r#"{{"error":"{}"}}"#, json_escape(&msg)));
+    }
+
+    if is_draft {
+        if let Ok(mut store) = state.settings.lock() {
+            let has_draft = !data.is_empty() || store.draft != Settings::default();
+            store.has_pending_draft = has_draft;
+            store.draft_updated_at = if has_draft { unix_now_secs() } else { 0 };
+            let _ = save_settings_store(&store);
+        }
+    }
+
+    (200, r#"{"ok":true}"#.to_string())
+}
+
+fn handle_post_compact(state: &AppState, body: &[u8]) -> (u16, String) {
+    let conv = parse_json_string_field(body, "conversationId")
+        .or_else(|| state.default_conv.clone())
+        .unwrap_or_default();
+
+    if is_draft_conv(&conv) || !is_valid_conv_id(&conv) {
+        return (400, r#"{"ok":false,"error":"No active conversation ID"}"#.to_string());
+    }
+
+    let path = transcript_path(&state.app_data, &conv);
+    let Ok(meta) = fs::metadata(&path) else {
+        return (200, r#"{"ok":false,"error":"Nothing to compact yet"}"#.to_string());
+    };
+    let cutoff = state
+        .settings
+        .lock()
+        .ok()
+        .and_then(|s| s.cutoffs.get(&conv).copied());
+    let scan = update_chat_scan(state, &conv, &path, meta.len(), cutoff);
+    if !scan.has_context_data {
+        return (200, r#"{"ok":false,"error":"Nothing to compact yet"}"#.to_string());
+    }
+    if scan.is_busy || scan.compact_in_flight {
+        return (
+            200,
+            r#"{"ok":false,"error":"Wait for the current turn to finish"}"#.to_string(),
+        );
+    }
+    if scan.just_compressed {
+        return (
+            200,
+            r#"{"ok":false,"error":"Already compacted; send a prompt first"}"#.to_string(),
+        );
+    }
+
+    match trigger_compact_via_ls(state, &conv) {
+        Ok(()) => (200, r#"{"ok":true}"#.to_string()),
+        Err(err) => (
+            200,
+            format!(r#"{{"ok":false,"error":"{}"}}"#, json_escape(&err)),
+        ),
+    }
+}
+
+fn resolve_ls_creds(state: &AppState) -> Result<(&str, &str), String> {
+    let raw_addr = state
+        .ls_address
+        .as_deref()
+        .ok_or_else(|| "Missing ANTIGRAVITY_LS_ADDRESS".to_string())?;
+    let csrf = state
+        .csrf_token
+        .as_deref()
+        .ok_or_else(|| "Missing ANTIGRAVITY_CSRF_TOKEN".to_string())?;
+
+    if csrf.bytes().any(|b| b == b'\r' || b == b'\n') {
+        return Err("Invalid ANTIGRAVITY_CSRF_TOKEN".to_string());
+    }
+
+    let trimmed = raw_addr.trim().trim_end_matches('/');
+    if trimmed.starts_with("https://") {
+        return Err("HTTPS language server is not supported yet".to_string());
+    }
+    let host_port = trimmed.strip_prefix("http://").unwrap_or(trimmed);
+    if !is_loopback_host_authority(host_port) {
+        return Err("Language server address must be on local loopback (127.0.0.1 / localhost)".to_string());
+    }
+    Ok((host_port, csrf))
+}
+
+fn handle_post_undo_compact(state: &AppState, body: &[u8]) -> (u16, String) {
+    let conv = parse_json_string_field(body, "conversationId")
+        .or_else(|| state.default_conv.clone())
+        .unwrap_or_default();
+
+    if is_draft_conv(&conv) || !is_valid_conv_id(&conv) {
+        return (400, r#"{"ok":false,"error":"No active conversation ID"}"#.to_string());
+    }
+
+    let path = transcript_path(&state.app_data, &conv);
+    let Ok(meta) = fs::metadata(&path) else {
+        return (200, r#"{"ok":false,"error":"Transcript not found"}"#.to_string());
+    };
+    let cutoff = state
+        .settings
+        .lock()
+        .ok()
+        .and_then(|s| s.cutoffs.get(&conv).copied());
+    let scan = update_chat_scan(state, &conv, &path, meta.len(), cutoff);
+    if scan.is_busy {
+        return (
+            200,
+            r#"{"ok":false,"error":"Wait for the current turn to finish"}"#.to_string(),
+        );
+    }
+    let Some(step_index) = scan.undo_step_index else {
+        return (
+            200,
+            r#"{"ok":false,"error":"Nothing to undo"}"#.to_string(),
+        );
+    };
+
+    match trigger_undo_compact_via_ls(state, &conv, step_index) {
+        Ok(()) => {
+            if let Ok(mut store) = state.settings.lock() {
+                store.insert_cutoff(
+                    conv.clone(),
+                    RevertCutoff {
+                        bytes_len: meta.len(),
+                        max_step: step_index,
+                    },
+                );
+                store.rev = store.rev.saturating_add(1);
+                let _ = save_settings_store(&store);
+            }
+            if let Ok(mut guard) = state.scans.lock() {
+                guard.remove(&conv);
+            }
+            if let Ok(mut guard) = state.cache.lock() {
+                guard.remove(&conv);
+            }
+            let (play_sound, sound_volume) = read_native_sound_settings(&state.app_data);
+            (
+                200,
+                format!(
+                    r#"{{"ok":true,"play_sound":{play_sound},"sound_volume":{sound_volume}}}"#
+                ),
+            )
+        }
+        Err(err) => (
+            200,
+            format!(r#"{{"ok":false,"error":"{}"}}"#, json_escape(&err)),
+        ),
+    }
+}
+
+fn trigger_undo_compact_via_ls(
+    state: &AppState,
+    conv: &str,
+    step_index: u64,
+) -> Result<(), String> {
+    let (host_port, csrf) = resolve_ls_creds(state)?;
+    let endpoint = "/exa.language_server_pb.LanguageServerService/RevertToCascadeStep";
+    let body = format!(
+        r#"{{"cascadeId":"{}","stepIndex":{},"conversationOnly":true}}"#,
+        json_escape(conv),
+        step_index
+    );
+    let (status, resp_body) = post_ls_json(host_port, csrf, endpoint, &body)?;
+    if (200..=299).contains(&status) {
+        return Ok(());
+    }
+    Err(format!(
+        "LS rejected undo (HTTP {status}): {}",
+        truncate_chars(&resp_body, 160)
+    ))
+}
+
+fn trigger_compact_via_ls(state: &AppState, conv: &str) -> Result<(), String> {
+    let (host_port, csrf) = resolve_ls_creds(state)?;
+    let escaped_conv = json_escape(conv);
+
+    let mut info_json = resolve_compact_command_info(host_port, csrf, &escaped_conv);
+    if info_json.is_none() {
+        info_json = Some(r#"{"name":"compact"}"#.to_string());
+    }
+    let info_payload = info_json.unwrap();
+
+    let send_endpoint = "/exa.language_server_pb.LanguageServerService/SendUserCascadeMessage";
+    let body_structured = format!(
+        r#"{{"cascadeId":"{}","items":[{{"item":{{"slashCommand":{{"info":{}}}}}}}]}}"#,
+        escaped_conv, info_payload
+    );
+    let (status, resp_body) = post_ls_json(host_port, csrf, send_endpoint, &body_structured)?;
+    if (200..=299).contains(&status) {
+        return Ok(());
+    }
+
+    if info_payload != r#"{"name":"compact"}"# {
+        let body_min = format!(
+            r#"{{"cascadeId":"{}","items":[{{"item":{{"slashCommand":{{"info":{{"name":"compact"}}}}}}}}]}}"#,
+            escaped_conv
+        );
+        let (st2, rb2) = post_ls_json(host_port, csrf, send_endpoint, &body_min)?;
+        if (200..=299).contains(&st2) {
+            return Ok(());
+        }
+        return Err(format!(
+            "LS rejected compact (HTTP {status}/{st2}): {}",
+            truncate_chars(if !rb2.is_empty() { &rb2 } else { &resp_body }, 160)
+        ));
+    }
+
+    Err(format!(
+        "LS rejected compact (HTTP {status}): {}",
+        truncate_chars(&resp_body, 160)
+    ))
+}
+
+fn resolve_compact_command_info(host_port: &str, csrf: &str, escaped_conv: &str) -> Option<String> {
+    let endpoint = "/exa.language_server_pb.LanguageServerService/GetSlashCommands";
+    let req_body = format!(r#"{{"cascadeId":"{}"}}"#, escaped_conv);
+    let (status, body) = post_ls_json(host_port, csrf, endpoint, &req_body).ok()?;
+    if !(200..=299).contains(&status) || body.is_empty() {
+        return None;
+    }
+    extract_compact_info_from_response(body.as_bytes())
+}
+
+fn extract_compact_info_from_response(b: &[u8]) -> Option<String> {
+    let mut found = None;
+    parse_json_object_entries(b, |key, val_slice| {
+        if found.is_none() && key == "commands" && val_slice.first() == Some(&b'[') {
+            let mut i = 0;
+            found = scan_commands_array(val_slice, &mut i);
+        }
+    })?;
+    found
+}
+
+fn scan_commands_array(b: &[u8], i: &mut usize) -> Option<String> {
+    if b.get(*i) != Some(&b'[') {
+        return None;
+    }
+    *i += 1;
+    loop {
+        skip_ws(b, i);
+        if b.get(*i) == Some(&b']') {
+            *i += 1;
+            return None;
+        }
+        let start = *i;
+        skip_value(b, i)?;
+        let elem = &b[start..*i];
+        if let Some(info_json) = extract_info_if_compact(elem) {
+            return Some(info_json);
+        }
+        skip_ws(b, i);
+        match b.get(*i) {
+            Some(&b',') => *i += 1,
+            Some(&b']') => {
+                *i += 1;
+                return None;
+            }
+            _ => return None,
+        }
+    }
+}
+
+fn extract_info_if_compact(obj: &[u8]) -> Option<String> {
+    let mut nested_info: Option<Vec<u8>> = None;
+    let mut direct_name: Option<String> = None;
+    let mut allowed_fields: Vec<(String, String)> = Vec::new();
+
+    parse_json_object_entries(obj, |key, val_slice| {
+        if key == "info" && val_slice.first() == Some(&b'{') {
+            nested_info = Some(val_slice.to_vec());
+        } else if key == "name" && val_slice.first() == Some(&b'"') {
+            let mut k = 0;
+            direct_name = parse_string(val_slice, &mut k);
+        }
+
+        if matches!(
+            key.as_str(),
+            "name"
+                | "modelFacingText"
+                | "type"
+                | "icon"
+                | "definitionPath"
+                | "displayName"
+                | "logo"
+                | "plugin"
+        ) {
+            allowed_fields.push((key, String::from_utf8_lossy(val_slice).into_owned()));
+        }
+    })?;
+
+    if let Some(info_bytes) = nested_info {
+        if let Some(nm) = parse_json_string_field(&info_bytes, "name") {
+            let clean = nm.trim_start_matches('/');
+            if clean.eq_ignore_ascii_case("compact") {
+                return Some(String::from_utf8_lossy(&info_bytes).into_owned());
+            }
+        }
+    }
+
+    if let Some(nm) = direct_name {
+        let clean = nm.trim_start_matches('/');
+        if clean.eq_ignore_ascii_case("compact") && !allowed_fields.is_empty() {
+            let mut out = String::from("{");
+            for (idx, (k, v)) in allowed_fields.iter().enumerate() {
+                if idx > 0 {
+                    out.push(',');
+                }
+                out.push('"');
+                out.push_str(&json_escape(k));
+                out.push_str("\":");
+                out.push_str(v);
+            }
+            out.push('}');
+            return Some(out);
+        }
+    }
+
+    None
+}
+
+fn decode_chunked_body(raw: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(raw.len());
+    let mut i = 0;
+    while i < raw.len() {
+        let Some(rel_end) = find_subslice(&raw[i..], b"\r\n") else {
+            break;
+        };
+        let line = String::from_utf8_lossy(&raw[i..i + rel_end]);
+        let hex_part = line.split(';').next().unwrap_or("").trim();
+        let Ok(chunk_len) = usize::from_str_radix(hex_part, 16) else {
+            break;
+        };
+        i += rel_end + 2;
+        if chunk_len == 0 {
+            break;
+        }
+        let end = (i + chunk_len).min(raw.len());
+        out.extend_from_slice(&raw[i..end]);
+        i = (end + 2).min(raw.len());
+    }
+    if out.is_empty() && !raw.is_empty() {
+        raw.to_vec()
+    } else {
+        out
+    }
+}
+
+fn ls_http_request_with_cap(
+    host_port: &str,
+    req: &str,
+    timeout: Duration,
+    init_cap: usize,
+    max_cap: usize,
+) -> Result<(u16, Vec<u8>), String> {
+    let mut stream = TcpStream::connect(host_port)
+        .map_err(|e| format!("Failed to connect to LS ({host_port}): {e}"))?;
+    let _ = stream.set_read_timeout(Some(timeout));
+    let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+
+    stream
+        .write_all(req.as_bytes())
+        .map_err(|e| format!("Failed to write to LS: {e}"))?;
+    let _ = stream.flush();
+
+    let mut resp = Vec::with_capacity(init_cap);
+    let mut buf = [0u8; 8192];
+    while resp.len() < max_cap {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => resp.extend_from_slice(&buf[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => {
+                if resp.is_empty() {
+                    return Err(format!("LS read failed: {e}"));
+                }
+                break;
+            }
+        }
+    }
+
+    if resp.is_empty() {
+        return Err("LS closed connection without response".to_string());
+    }
+
+    let split = find_subslice(&resp, b"\r\n\r\n");
+    let (head_bytes, body_bytes) = match split {
+        Some(pos) => (&resp[..pos], &resp[pos + 4..]),
+        None => (&resp[..], &[][..]),
+    };
+
+    let head = String::from_utf8_lossy(head_bytes);
+    let first_line = head.lines().next().unwrap_or("");
+    let status = first_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse::<u16>().ok())
+        .ok_or_else(|| format!("Unexpected LS response: {}", truncate_chars(first_line, 80)))?;
+
+    let is_chunked = head.lines().skip(1).any(|line| {
+        line.split_once(':').is_some_and(|(k, v)| {
+            k.trim().eq_ignore_ascii_case("transfer-encoding")
+                && v.to_ascii_lowercase().contains("chunked")
+        })
+    });
+
+    let body = if is_chunked {
+        decode_chunked_body(body_bytes)
+    } else {
+        body_bytes.to_vec()
+    };
+
+    Ok((status, body))
+}
+
+fn ls_http_request(
+    host_port: &str,
+    req: &str,
+    timeout: Duration,
+    init_cap: usize,
+) -> Result<(u16, Vec<u8>), String> {
+    ls_http_request_with_cap(host_port, req, timeout, init_cap, 1_048_576)
+}
+
+fn post_ls_json_bytes(
+    host_port: &str,
+    csrf: &str,
+    endpoint: &str,
+    json_body: &str,
+    timeout: Duration,
+    max_cap: usize,
+) -> Result<(u16, Vec<u8>), String> {
+    let req = format!(
+        "POST {endpoint} HTTP/1.0\r\nHost: {host_port}\r\nContent-Type: application/json\r\nx-codeium-csrf-token: {csrf}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json_body}",
+        json_body.len()
+    );
+    ls_http_request_with_cap(host_port, &req, timeout, 4096, max_cap)
+}
+
+fn post_ls_json(
+    host_port: &str,
+    csrf: &str,
+    endpoint: &str,
+    json_body: &str,
+) -> Result<(u16, String), String> {
+    let (status, body_bytes) = post_ls_json_bytes(
+        host_port,
+        csrf,
+        endpoint,
+        json_body,
+        Duration::from_secs(10),
+        1_048_576,
+    )?;
+    let body_text = String::from_utf8_lossy(&body_bytes).trim().to_string();
+    Ok((status, body_text))
+}
+
+fn parse_trajectory_titles_json(b: &[u8]) -> HashMap<String, String> {
+    let mut titles = HashMap::new();
+    let _ = parse_json_object_entries(b, |key, val_slice| {
+        if key == "trajectorySummaries" && val_slice.first() == Some(&b'{') {
+            let _ = parse_json_object_entries(val_slice, |conv_id, obj_slice| {
+                if let Some(summary) = parse_json_string_field(obj_slice, "summary") {
+                    let clean = summary.trim().to_string();
+                    if !clean.is_empty() {
+                        titles.insert(conv_id, clean);
+                    }
+                }
+            });
+        }
+    });
+    titles
+}
+
+fn resolve_chat_titles(state: &AppState) -> HashMap<String, String> {
+    let now = unix_now_secs();
+    if let Ok(guard) = state.chat_titles.lock() {
+        if !guard.1.is_empty() && now.saturating_sub(guard.0) < 60 {
+            return guard.1.clone();
+        }
+    }
+
+    if let Ok((host_port, csrf)) = resolve_ls_creds(state) {
+        if let Ok((status, body_bytes)) = post_ls_json_bytes(
+            host_port,
+            csrf,
+            "/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories",
+            "{}",
+            Duration::from_millis(1800),
+            8 * 1024 * 1024,
+        ) {
+            if (200..=299).contains(&status) && !body_bytes.is_empty() {
+                let parsed = parse_trajectory_titles_json(&body_bytes);
+                if !parsed.is_empty() {
+                    if let Ok(mut guard) = state.chat_titles.lock() {
+                        guard.0 = now;
+                        guard.1 = parsed.clone();
+                    }
+                    return parsed;
+                }
+            }
+        }
+    }
+
+    state
+        .chat_titles
+        .lock()
+        .map(|g| g.1.clone())
+        .unwrap_or_default()
+}
+
+fn get_native_cascade_done_mp3(state: &AppState) -> Option<&[u8]> {
+    if let Some(cached) = state.done_sound_mp3.get() {
+        return Some(cached.as_slice());
+    }
+    let bytes = fetch_ls_static_asset(state, "/antigravityCascadeDone.mp3").ok()?;
+    let _ = state.done_sound_mp3.set(bytes);
+    state.done_sound_mp3.get().map(Vec::as_slice)
+}
+
+fn fetch_ls_static_asset(state: &AppState, asset_path: &str) -> Result<Vec<u8>, String> {
+    let (host_port, csrf) = resolve_ls_creds(state)?;
+    let req = format!(
+        "GET {asset_path} HTTP/1.0\r\nHost: {host_port}\r\nx-codeium-csrf-token: {csrf}\r\nConnection: close\r\n\r\n"
+    );
+    let (status, body) = ls_http_request(host_port, &req, Duration::from_secs(5), 65_536)?;
+    if status != 200 || body.is_empty() {
+        return Err(format!("LS asset returned HTTP {status}"));
+    }
+    Ok(body)
+}
+
+fn read_native_sound_settings(app_data: &Path) -> (bool, u8) {
+    let gemini_dir = app_data
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| home_dir().join(".gemini"));
+    let cfg_path = gemini_dir.join("config").join("config.json");
+    let Ok(bytes) = fs::read(cfg_path) else {
+        return (false, 100);
+    };
+    parse_native_sound_settings(&bytes)
+}
+
+fn parse_native_sound_settings(b: &[u8]) -> (bool, u8) {
+    let mut enabled = false;
+    let mut volume: u8 = 100;
+    let _ = parse_json_object_entries(b, |k, v| {
+        if k == "userSettings" {
+            let _ = parse_json_object_entries(v, |uk, uv| {
+                let mut idx = 0;
+                skip_ws(uv, &mut idx);
+                if uk == "enableSoundsForSpecialEvents" {
+                    if let Some(val) = parse_bool(uv, &mut idx) {
+                        enabled = val;
+                    }
+                } else if uk == "agentSoundVolume" {
+                    if let Some(val) = parse_u64(uv, &mut idx) {
+                        volume = val.min(100) as u8;
+                    }
+                }
+            });
+        }
+    });
+    (enabled, volume)
+}
+
+struct SearchMatchedRecord {
+    step_index: u64,
+    role: &'static str,
+    created_at: String,
+    epoch: u64,
+    rank: u8,
+    snippet: String,
+    text: String,
+}
+
+struct SearchMatchResult {
+    conv_id: String,
+    chat_title: String,
+    is_current: bool,
+    step_index: u64,
+    role: &'static str,
+    created_at: String,
+    archived: bool,
+    rank: u8,
+    snippet: String,
+    text: String,
+}
+
+struct SearchMatchWindow {
+    snippet_start: usize,
+    snippet_end: usize,
+    text_start: usize,
+    text_end: usize,
+    rank: u8,
+}
+
+fn parse_search_query_terms(raw_query: &str) -> Vec<String> {
+    let trimmed = raw_query.trim();
+    if trimmed.is_empty() {
+        return Vec::new();
+    }
+    if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('«') && trimmed.ends_with('»')))
+    {
+        let inner = trimmed
+            .trim_start_matches(['"', '«'])
+            .trim_end_matches(['"', '»'])
+            .trim()
+            .to_lowercase();
+        return if inner.is_empty() {
+            Vec::new()
+        } else {
+            vec![inner]
+        };
+    }
+    trimmed
+        .split_whitespace()
+        .map(|w| w.to_lowercase())
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+fn find_occurrences_in_lower(lower: &str, needle: &str, limit: usize) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    if needle.is_empty() || limit == 0 {
+        return out;
+    }
+    let mut pos = 0usize;
+    while pos <= lower.len() && out.len() < limit {
+        let Some(rel) = lower[pos..].find(needle) else {
+            break;
+        };
+        let start = pos + rel;
+        let end = start + needle.len();
+        out.push((start, end));
+        pos = end.max(start + 1);
+    }
+    out
+}
+
+fn match_query_best_window(text: &str, terms: &[String]) -> Option<SearchMatchWindow> {
+    if terms.is_empty() {
+        return None;
+    }
+
+    if terms.len() == 1 {
+        let (start, end) = find_case_insensitive_byte_range(text, &terms[0])?;
+        return Some(SearchMatchWindow {
+            snippet_start: start,
+            snippet_end: end,
+            text_start: start,
+            text_end: end,
+            rank: 0,
+        });
+    }
+
+    let lower = text.to_lowercase();
+    for term in terms {
+        if !lower.contains(term.as_str()) {
+            return None;
+        }
+    }
+
+    let exact_phrase = terms.join(" ");
+
+    // Fallback when lowercase changes UTF-8 byte lengths (e.g. dotted I)
+    if text.len() != lower.len() {
+        if let Some((start, end)) = find_case_insensitive_byte_range(text, &exact_phrase) {
+            return Some(SearchMatchWindow {
+                snippet_start: start,
+                snippet_end: end,
+                text_start: start,
+                text_end: end,
+                rank: 0,
+            });
+        }
+        let mut first_range: Option<(usize, usize)> = None;
+        for term in terms {
+            let range = find_case_insensitive_byte_range(text, term)?;
+            if first_range.is_none() {
+                first_range = Some(range);
+            }
+        }
+        let (start, end) = first_range?;
+        return Some(SearchMatchWindow {
+            snippet_start: start,
+            snippet_end: end,
+            text_start: start,
+            text_end: end,
+            rank: 2,
+        });
+    }
+
+    // Tier 0: exact phrase match in order
+    if let Some(start) = lower.find(&exact_phrase) {
+        let end = start + exact_phrase.len();
+        if text.is_char_boundary(start) && text.is_char_boundary(end) {
+            return Some(SearchMatchWindow {
+                snippet_start: start,
+                snippet_end: end,
+                text_start: start,
+                text_end: end,
+                rank: 0,
+            });
+        }
+    }
+
+    // Deduplicate terms while preserving order for minimum covering window search
+    let mut unique_terms: Vec<&str> = Vec::with_capacity(terms.len());
+    for t in terms {
+        if !unique_terms.contains(&t.as_str()) {
+            unique_terms.push(t.as_str());
+        }
+    }
+    if unique_terms.len() == 1 {
+        let (start, end) = find_case_insensitive_byte_range(text, unique_terms[0])?;
+        return Some(SearchMatchWindow {
+            snippet_start: start,
+            snippet_end: end,
+            text_start: start,
+            text_end: end,
+            rank: 0,
+        });
+    }
+
+    let mut occs: Vec<Vec<(usize, usize)>> = Vec::with_capacity(unique_terms.len());
+    for term in &unique_terms {
+        let list = find_occurrences_in_lower(&lower, term, 64);
+        if list.is_empty() {
+            return None;
+        }
+        occs.push(list);
+    }
+
+    let mut ptrs = vec![0usize; occs.len()];
+    let mut best: Option<(usize, usize, usize, usize)> = None;
+    loop {
+        let mut min_ti = 0usize;
+        let mut min_start = usize::MAX;
+        let mut min_first_end = 0usize;
+        let mut max_end = 0usize;
+
+        for (ti, list) in occs.iter().enumerate() {
+            let (s, e) = list[ptrs[ti]];
+            if s < min_start {
+                min_start = s;
+                min_first_end = e;
+                min_ti = ti;
+            }
+            if e > max_end {
+                max_end = e;
+            }
+        }
+
+        let span = max_end.saturating_sub(min_start);
+        if best.is_none_or(|(_, _, _, best_span)| span < best_span) {
+            best = Some((min_start, max_end, min_first_end, span));
+        }
+
+        ptrs[min_ti] += 1;
+        if ptrs[min_ti] >= occs[min_ti].len() {
+            break;
+        }
+    }
+
+    let (win_start, win_end, first_end, _) = best?;
+    if !text.is_char_boundary(win_start)
+        || !text.is_char_boundary(win_end)
+        || !text.is_char_boundary(first_end)
+    {
+        let (start, end) = find_case_insensitive_byte_range(text, &terms[0])?;
+        return Some(SearchMatchWindow {
+            snippet_start: start,
+            snippet_end: end,
+            text_start: start,
+            text_end: end,
+            rank: 2,
+        });
+    }
+
+    let span_chars = text[win_start..win_end].chars().count();
+    if span_chars <= SEARCH_CLOSE_SPAN_CHARS {
+        Some(SearchMatchWindow {
+            snippet_start: win_start,
+            snippet_end: win_end,
+            text_start: win_start,
+            text_end: win_end,
+            rank: 1,
+        })
+    } else {
+        Some(SearchMatchWindow {
+            snippet_start: win_start,
+            snippet_end: first_end,
+            text_start: win_start,
+            text_end: win_end,
+            rank: 2,
+        })
+    }
+}
+
+fn handle_get_search(
+    state: &AppState,
+    conv: &str,
+    raw_query: &str,
+    scope: &str,
+) -> (u16, String) {
+    // Advance generation for every search request so any in-flight All-chats scan stops immediately
+    let my_gen = state.search_gen.fetch_add(1, Ordering::AcqRel) + 1;
+    let q_trimmed = raw_query.trim();
+    if q_trimmed.is_empty() {
+        return (200, r#"{"results":[],"total":0}"#.to_string());
+    }
+
+    let search_all = scope.eq_ignore_ascii_case("all");
+    let (results, total) = if search_all {
+        let cutoffs = state
+            .settings
+            .lock()
+            .map(|s| s.cutoffs.clone())
+            .unwrap_or_default();
+        let titles = resolve_chat_titles(state);
+        search_all_transcripts(
+            &state.app_data,
+            conv,
+            q_trimmed,
+            &cutoffs,
+            &titles,
+            Some((&state.search_gen, my_gen)),
+        )
+    } else {
+        if is_draft_conv(conv) || !is_valid_conv_id(conv) {
+            return (200, r#"{"results":[],"total":0}"#.to_string());
+        }
+        let path = transcript_path(&state.app_data, conv);
+        if !path.exists() {
+            return (200, r#"{"results":[],"total":0}"#.to_string());
+        }
+        let cutoff = state
+            .settings
+            .lock()
+            .ok()
+            .and_then(|s| s.cutoffs.get(conv).copied());
+        search_transcript(&path, q_trimmed, cutoff)
+    };
+
+    let mut out = String::from(r#"{"results":["#);
+    for (idx, r) in results.iter().enumerate() {
+        if idx > 0 {
+            out.push(',');
+        }
+        out.push_str(&format!(
+            r#"{{"conv_id":"{}","chat_title":"{}","is_current":{},"step_index":{},"role":"{}","created_at":"{}","archived":{},"snippet":"{}","text":"{}"}}"#,
+            json_escape(&r.conv_id),
+            json_escape(&r.chat_title),
+            r.is_current,
+            r.step_index,
+            r.role,
+            json_escape(&r.created_at),
+            r.archived,
+            json_escape(&r.snippet),
+            json_escape(&r.text),
+        ));
+    }
+    out.push_str(&format!(r#"],"total":{total}}}"#));
+    (200, out)
+}
+
+fn search_transcript_with_fallback_title(
+    path: &Path,
+    query: &str,
+    cutoff: Option<RevertCutoff>,
+) -> (Vec<SearchMatchResult>, usize, Option<String>) {
+    let terms = parse_search_query_terms(query);
+    if terms.is_empty() {
+        return (Vec::new(), 0, None);
+    }
+
+    let Ok(f) = File::open(path) else {
+        return (Vec::new(), 0, None);
+    };
+    let mut reader = BufReader::with_capacity(64 * 1024, f);
+    let mut buf = Vec::with_capacity(4096);
+    let mut offset: u64 = 0;
+    let mut step_history: Vec<(u64, bool)> = Vec::new();
+    let mut matched_records: Vec<SearchMatchedRecord> = Vec::new();
+    let mut epoch: u64 = 0;
+    let mut first_user_title: Option<String> = None;
+
+    loop {
+        buf.clear();
+        let Ok(n) = reader.read_until(b'\n', &mut buf) else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        let line_end = offset.saturating_add(n as u64);
+        offset = line_end;
+        if !buf.ends_with(b"\n") {
+            break;
+        }
+        let trimmed = trim_ascii(&buf);
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some((step_index, kind, created_at, content_pos)) = parse_search_line(trimmed) else {
+            continue;
+        };
+        if cutoff.is_some_and(|c| line_end <= c.bytes_len && step_index > c.max_step) {
+            continue;
+        }
+
+        // Handle historical branch rewind consistently with ChatScanState
+        if step_history
+            .last()
+            .is_some_and(|&(last_idx, _)| step_index <= last_idx)
+        {
+            step_history.retain(|&(idx, _)| idx < step_index);
+            matched_records.retain(|r| r.step_index < step_index);
+            epoch = step_history.iter().filter(|&&(_, is_sum)| is_sum).count() as u64;
+        }
+
+        let role = match kind {
+            StepKind::UserInput => "user",
+            StepKind::PlannerResponse => "agent",
+            StepKind::Checkpoint => "summary",
+            _ => continue,
+        };
+
+        let is_summary = role == "summary";
+        step_history.push((step_index, is_summary));
+
+        let Some(pos) = content_pos else {
+            if is_summary {
+                epoch = epoch.saturating_add(1);
+            }
+            continue;
+        };
+        let mut c_idx = pos;
+        let Some(raw_content) = parse_string(trimmed, &mut c_idx) else {
+            if is_summary {
+                epoch = epoch.saturating_add(1);
+            }
+            continue;
+        };
+
+        if role == "user" && is_compact_request_text(&raw_content) {
+            continue;
+        }
+
+        let clean_text = if role == "user" {
+            extract_clean_user_text(&raw_content)
+        } else {
+            raw_content.trim().to_string()
+        };
+
+        if role == "user" && first_user_title.is_none() && !clean_text.is_empty() {
+            let one_line: String = clean_text
+                .chars()
+                .map(|c| if c.is_whitespace() { ' ' } else { c })
+                .collect();
+            first_user_title = Some(truncate_chars(one_line.trim(), 60));
+        }
+
+        let rec_epoch = epoch;
+        if is_summary {
+            epoch = epoch.saturating_add(1);
+        }
+
+        if clean_text.is_empty() {
+            continue;
+        }
+
+        if let Some(win) = match_query_best_window(&clean_text, &terms) {
+            matched_records.push(SearchMatchedRecord {
+                step_index,
+                role,
+                created_at,
+                epoch: rec_epoch,
+                rank: win.rank,
+                snippet: build_search_snippet(&clean_text, win.snippet_start, win.snippet_end),
+                text: truncate_around_match(
+                    &clean_text,
+                    win.text_start,
+                    win.text_end,
+                    MAX_SEARCH_TEXT_CHARS,
+                ),
+            });
+        }
+    }
+
+    let total = matched_records.len();
+    matched_records.sort_by(|a, b| {
+        a.rank
+            .cmp(&b.rank)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| b.step_index.cmp(&a.step_index))
+    });
+
+    let mut matches = Vec::with_capacity(total.min(MAX_SEARCH_RESULTS));
+    for rec in matched_records.into_iter().take(MAX_SEARCH_RESULTS) {
+        let archived = if rec.role == "summary" {
+            rec.epoch.saturating_add(1) < epoch
+        } else {
+            rec.epoch < epoch
+        };
+        matches.push(SearchMatchResult {
+            conv_id: String::new(),
+            chat_title: String::new(),
+            is_current: false,
+            step_index: rec.step_index,
+            role: rec.role,
+            created_at: rec.created_at,
+            archived,
+            rank: rec.rank,
+            snippet: rec.snippet,
+            text: rec.text,
+        });
+    }
+
+    (matches, total, first_user_title)
+}
+
+fn search_transcript(
+    path: &Path,
+    query: &str,
+    cutoff: Option<RevertCutoff>,
+) -> (Vec<SearchMatchResult>, usize) {
+    let (matches, total, _) = search_transcript_with_fallback_title(path, query, cutoff);
+    (matches, total)
+}
+
+fn search_all_transcripts(
+    app_data: &Path,
+    current_conv: &str,
+    query: &str,
+    cutoffs: &HashMap<String, RevertCutoff>,
+    titles: &HashMap<String, String>,
+    cancel_check: Option<(&AtomicUsize, usize)>,
+) -> (Vec<SearchMatchResult>, usize) {
+    let brain_dir = app_data.join("brain");
+    let Ok(entries) = fs::read_dir(&brain_dir) else {
+        return (Vec::new(), 0);
+    };
+
+    let mut candidates: Vec<(u128, String, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !is_valid_conv_id(&name) {
+            continue;
+        }
+        let t_path = entry
+            .path()
+            .join(".system_generated")
+            .join("logs")
+            .join("transcript_full.jsonl");
+        let Ok(meta) = fs::metadata(&t_path) else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() == 0 {
+            continue;
+        }
+        let mtime_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        candidates.push((mtime_ms, name, t_path));
+    }
+
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
+    if candidates.len() > MAX_ALL_SEARCH_CHATS {
+        candidates.truncate(MAX_ALL_SEARCH_CHATS);
+    }
+
+    let mut all_matches: Vec<SearchMatchResult> = Vec::new();
+    let mut grand_total: usize = 0;
+
+    for (_, conv_id, t_path) in candidates {
+        if let Some((gen_ref, expected)) = cancel_check {
+            if gen_ref.load(Ordering::Acquire) != expected {
+                return (Vec::new(), 0);
+            }
+        }
+        let cutoff = cutoffs.get(&conv_id).copied();
+        let (mut chat_matches, chat_total, fallback_title) =
+            search_transcript_with_fallback_title(&t_path, query, cutoff);
+        if chat_total == 0 {
+            continue;
+        }
+        grand_total = grand_total.saturating_add(chat_total);
+        let title = titles
+            .get(&conv_id)
+            .cloned()
+            .or(fallback_title)
+            .unwrap_or_else(|| truncate_chars(&conv_id, 12));
+        let is_cur = !current_conv.is_empty() && conv_id == current_conv;
+        for m in &mut chat_matches {
+            m.conv_id = conv_id.clone();
+            m.chat_title = title.clone();
+            m.is_current = is_cur;
+        }
+        all_matches.extend(chat_matches);
+    }
+
+    all_matches.sort_by(|a, b| {
+        a.rank
+            .cmp(&b.rank)
+            .then_with(|| b.created_at.cmp(&a.created_at))
+            .then_with(|| b.step_index.cmp(&a.step_index))
+    });
+    if all_matches.len() > MAX_SEARCH_RESULTS {
+        all_matches.truncate(MAX_SEARCH_RESULTS);
+    }
+    (all_matches, grand_total)
+}
+
+fn parse_search_line(b: &[u8]) -> Option<(u64, StepKind, String, Option<usize>)> {
+    let mut step_index = 0u64;
+    let mut kind = StepKind::Other;
+    let mut created_at = String::new();
+    let mut content_pos: Option<usize> = None;
+
+    parse_json_object_entries(b, |key, val_slice| {
+        let mut idx = 0;
+        match key.as_str() {
+            "step_index" => {
+                if let Some(n) = parse_u64(val_slice, &mut idx) {
+                    step_index = n;
+                }
+            }
+            "type" if val_slice.first() == Some(&b'"') => {
+                if let Some(s) = parse_string(val_slice, &mut idx) {
+                    kind = StepKind::from_str(&s);
+                }
+            }
+            "created_at" if val_slice.first() == Some(&b'"') => {
+                if let Some(s) = parse_string(val_slice, &mut idx) {
+                    created_at = s;
+                }
+            }
+            "content" if val_slice.first() == Some(&b'"') => {
+                let offset = val_slice.as_ptr() as usize - b.as_ptr() as usize;
+                content_pos = Some(offset);
+            }
+            _ => {}
+        }
+    })?;
+
+    Some((step_index, kind, created_at, content_pos))
+}
+
+fn extract_clean_user_text(raw: &str) -> String {
+    if let Some(open_pos) = raw.rfind("<USER_REQUEST>") {
+        let after_open = &raw[open_pos + "<USER_REQUEST>".len()..];
+        if let Some((inner, _)) = after_open.split_once("</USER_REQUEST>") {
+            return inner.trim().to_string();
+        }
+    }
+    let without_summary = if let Some(cs_end) = raw.rfind("</CONTEXT_SUMMARY>") {
+        &raw[cs_end + "</CONTEXT_SUMMARY>".len()..]
+    } else {
+        raw
+    };
+    let clean = match without_summary.split_once("<ADDITIONAL_METADATA>") {
+        Some((before, _)) => before,
+        None => without_summary,
+    };
+    clean.trim().to_string()
+}
+
+fn find_case_insensitive_byte_range(text: &str, q_lower: &str) -> Option<(usize, usize)> {
+    let lower = text.to_lowercase();
+    let lower_start = lower.find(q_lower)?;
+    if text.len() == lower.len() && text.is_char_boundary(lower_start) {
+        let end = lower_start + q_lower.len();
+        if text.is_char_boundary(end) {
+            return Some((lower_start, end));
+        }
+    }
+
+    // Fallback for characters whose lowercase representation changes byte length (e.g. İ)
+    let q_chars: Vec<char> = q_lower.chars().collect();
+    if q_chars.is_empty() {
+        return None;
+    }
+    let orig_chars: Vec<(usize, char)> = text.char_indices().collect();
+    for start_idx in 0..orig_chars.len() {
+        let mut qi = 0usize;
+        let mut end_idx = start_idx;
+        while end_idx < orig_chars.len() && qi < q_chars.len() {
+            let mut matched_all = true;
+            for lc in orig_chars[end_idx].1.to_lowercase() {
+                if qi < q_chars.len() && lc == q_chars[qi] {
+                    qi += 1;
+                } else {
+                    matched_all = false;
+                    break;
+                }
+            }
+            if !matched_all {
+                break;
+            }
+            end_idx += 1;
+        }
+        if qi == q_chars.len() {
+            let byte_start = orig_chars[start_idx].0;
+            let byte_end = orig_chars
+                .get(end_idx)
+                .map(|&(p, _)| p)
+                .unwrap_or(text.len());
+            return Some((byte_start, byte_end));
+        }
+    }
+    None
+}
+
+fn build_search_snippet(text: &str, match_start: usize, match_end: usize) -> String {
+    let before = &text[..match_start];
+    let after = &text[match_end..];
+    let left_chars: Vec<(usize, char)> = before.char_indices().collect();
+    let slice_start = if left_chars.len() > 60 {
+        left_chars[left_chars.len() - 60].0
+    } else {
+        0
+    };
+    let right_end = after
+        .char_indices()
+        .nth(90)
+        .map(|(p, _)| match_end + p)
+        .unwrap_or(text.len());
+
+    let mut out = String::new();
+    if slice_start > 0 {
+        out.push('…');
+    }
+    let raw_slice = &text[slice_start..right_end];
+    let mut prev_ws = false;
+    for ch in raw_slice.chars() {
+        if ch.is_whitespace() {
+            if !prev_ws {
+                out.push(' ');
+                prev_ws = true;
+            }
+        } else {
+            out.push(ch);
+            prev_ws = false;
+        }
+    }
+    if right_end < text.len() {
+        out.push('…');
+    }
+    out
+}
+
+fn truncate_around_match(
+    text: &str,
+    match_start: usize,
+    match_end: usize,
+    max_chars: usize,
+) -> String {
+    let total_chars = text.chars().count();
+    if total_chars <= max_chars {
+        return text.to_string();
+    }
+    let before_chars = text[..match_start].chars().count();
+    let match_chars = text[match_start..match_end].chars().count();
+    let half = max_chars.saturating_sub(match_chars) / 2;
+    let start_char = before_chars.saturating_sub(half);
+    let end_char = (start_char + max_chars).min(total_chars);
+    let byte_start = text
+        .char_indices()
+        .nth(start_char)
+        .map(|(p, _)| p)
+        .unwrap_or(0);
+    let byte_end = text
+        .char_indices()
+        .nth(end_char)
+        .map(|(p, _)| p)
+        .unwrap_or(text.len());
+    let mut out = String::new();
+    if start_char > 0 {
+        out.push_str("…\n");
+    }
+    out.push_str(&text[byte_start..byte_end]);
+    if end_char < total_chars {
+        out.push_str("\n…");
+    }
+    out
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    let mut out = String::new();
+    for (idx, ch) in s.chars().enumerate() {
+        if idx >= max_chars {
+            out.push_str("...");
+            break;
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn send_response(
+    stream: &mut TcpStream,
+    status: u16,
+    content_type: &str,
+    body: &[u8],
+    keep_alive: bool,
+) {
+    let reason = match status {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        413 => "Payload Too Large",
+        _ => "Error",
+    };
+    let conn_hdr = if keep_alive { "keep-alive" } else { "close" };
+    let header = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nCache-Control: no-store\r\nX-Content-Type-Options: nosniff\r\nReferrer-Policy: no-referrer\r\nConnection: {conn_hdr}\r\n\r\n",
+        body.len()
+    );
+    let _ = stream.write_all(header.as_bytes());
+    let _ = stream.write_all(body);
+    let _ = stream.flush();
+}
+
+fn is_valid_conv_id(s: &str) -> bool {
+    s.len() >= 8
+        && s.len() <= 128
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
+fn update_chat_scan(
+    state: &AppState,
+    conv: &str,
+    path: &Path,
+    file_size: u64,
+    cutoff: Option<RevertCutoff>,
+) -> ChatScanSummary {
+    let Ok(mut guard) = state.scans.lock() else {
+        return ChatScanSummary::default();
+    };
+    if guard.len() > 150 && !guard.contains_key(conv) {
+        guard.clear();
+    }
+    let st = guard.entry(conv.to_string()).or_default();
+
+    if file_size < st.offset || st.cutoff_applied != cutoff {
+        *st = ChatScanState {
+            cutoff_applied: cutoff,
+            ..Default::default()
+        };
+    }
+    if file_size == st.offset {
+        return st.to_summary();
+    }
+
+    let Ok(mut f) = File::open(path) else {
+        return st.to_summary();
+    };
+    if st.offset > 0 && f.seek(SeekFrom::Start(st.offset)).is_err() {
+        *st = ChatScanState {
+            cutoff_applied: cutoff,
+            ..Default::default()
+        };
+        let _ = f.seek(SeekFrom::Start(0));
+    }
+
+    let mut reader = BufReader::with_capacity(64 * 1024, f);
+    let mut buf = Vec::with_capacity(4096);
+    let mut busy_partial = false;
+
+    loop {
+        buf.clear();
+        let Ok(n) = reader.read_until(b'\n', &mut buf) else {
+            break;
+        };
+        if n == 0 {
+            break;
+        }
+        let ended_with_nl = buf.ends_with(b"\n");
+        if !ended_with_nl {
+            busy_partial = true;
+            break;
+        }
+
+        let line_end = st.offset.saturating_add(n as u64);
+        st.offset = line_end;
+        let trimmed = trim_ascii(&buf);
+        if trimmed.is_empty() {
+            continue;
+        }
+        let Some(m) = parse_line(trimmed) else {
+            continue;
+        };
+        if cutoff.is_some_and(|c| line_end <= c.bytes_len && m.step_index > c.max_step) {
+            continue;
+        }
+        push_step_to_scan(st, m);
+    }
+
+    let mut summary = st.to_summary();
+    if busy_partial {
+        summary.is_busy = true;
+        summary.turn_finished = false;
+    }
+    summary
+}
+
+fn push_step_to_scan(scan: &mut ChatScanState, m: StepMetrics) {
+    let needs_rewind = scan
+        .steps
+        .last()
+        .is_some_and(|last| m.step_index <= last.step_index);
+    if needs_rewind {
+        scan.steps.retain(|s| s.step_index < m.step_index);
+        scan.steps.push(m);
+        recompute_scan_summary(scan);
+    } else {
+        apply_step_to_scan(scan, &m);
+        scan.steps.push(m);
+    }
+}
+
+fn recompute_scan_summary(scan: &mut ChatScanState) {
+    let offset = scan.offset;
+    let cutoff_applied = scan.cutoff_applied;
+    let steps = std::mem::take(&mut scan.steps);
+    *scan = ChatScanState {
+        offset,
+        cutoff_applied,
+        ..Default::default()
+    };
+    for m in &steps {
+        apply_step_to_scan(scan, m);
+    }
+    scan.steps = steps;
+}
+
+fn apply_step_to_scan(pending: &mut ChatScanState, m: &StepMetrics) {
+    let is_user = m.kind == StepKind::UserInput && !m.is_compact_cmd;
+    let is_model_reply =
+        m.kind == StepKind::PlannerResponse && m.has_content && !m.has_tool_calls;
+    let failed = m.is_failed();
+
+    if m.step_index > pending.latest_step_index {
+        pending.latest_step_index = m.step_index;
+    }
+
+    if m.is_compact_cmd {
+        pending.compact_in_flight = !failed;
+    } else if is_user {
+        pending.compact_in_flight = false;
+        pending.undo_step_index = None;
+        pending.last_non_compact_step = Some(m.step_index);
+        pending.user_messages = pending.user_messages.saturating_add(1);
+        pending.session_baseline_tokens = Some(if pending.has_context_data {
+            pending.context_tokens
+        } else {
+            0
+        });
+        pending.delta_tokens = 0;
+        pending.has_delta = true;
+        pending.just_compressed = false;
+    } else {
+        if failed {
+            pending.compact_in_flight = false;
+        }
+        if is_model_reply {
+            pending.model_messages = pending.model_messages.saturating_add(1);
+        }
+        if m.kind != StepKind::Checkpoint && !pending.compact_in_flight {
+            pending.last_non_compact_step = Some(m.step_index);
+        }
+    }
+
+    if m.kind == StepKind::Checkpoint {
+        let prev_tokens = if pending.has_context_data {
+            pending.context_tokens
+        } else {
+            0
+        };
+        pending.checkpoint_count = pending.checkpoint_count.saturating_add(1);
+        if m.step_index >= pending.last_checkpoint_step {
+            pending.last_checkpoint_step = m.step_index;
+        }
+        pending.undo_step_index = pending.last_non_compact_step;
+        pending.compact_in_flight = false;
+        pending.delta_tokens = (m.output_tokens as i64) - (prev_tokens as i64);
+        pending.has_delta = true;
+        pending.context_tokens = m.output_tokens;
+        pending.has_context_data = true;
+        pending.just_compressed = true;
+        pending.session_baseline_tokens = Some(m.output_tokens);
+    } else if m.kind == StepKind::PlannerResponse && m.has_tokens {
+        let total = m.cache_read_tokens.saturating_add(m.input_tokens);
+        if total > 0 {
+            let base = *pending.session_baseline_tokens.get_or_insert(
+                if pending.has_context_data {
+                    pending.context_tokens
+                } else {
+                    0
+                },
+            );
+            pending.delta_tokens = (total as i64) - (base as i64);
+            pending.has_delta = true;
+            pending.context_tokens = total;
+            pending.has_context_data = true;
+        }
+    }
+
+    if !m.created_at.is_empty() {
+        if pending.first_message_at.is_empty() && (is_user || is_model_reply) {
+            pending.first_message_at = m.created_at.clone();
+        }
+        if is_user || is_model_reply || pending.last_message_at.is_empty() {
+            pending.last_message_at = m.created_at.clone();
+        }
+    }
+
+    pending.turn_finished = m.kind == StepKind::PlannerResponse
+        && m.status == StepStatus::Done
+        && !m.has_tool_calls
+        && !failed;
+
+    pending.is_busy = !failed
+        && (m.status == StepStatus::Running
+            || m.kind == StepKind::UserInput
+            || m.kind == StepKind::SystemMessage
+            || (m.kind == StepKind::PlannerResponse && m.has_tool_calls)
+            || m.kind == StepKind::Generic);
+}
+
+fn build_context_json(state: &AppState, conv: &str, req_etag: &str) -> String {
+    maybe_promote_draft(state, conv);
+
+    let (chat_settings, cutoff, srev) = match state.settings.lock() {
+        Ok(store) => (
+            store.get_for_chat(conv),
+            store.cutoffs.get(conv).copied(),
+            store.rev,
+        ),
+        Err(_) => (Settings::default(), None, 0),
+    };
+    let settings_json = chat_settings.to_json();
+
+    if is_draft_conv(conv) || !is_valid_conv_id(conv) {
+        let etag = format!("none:s{srev}");
+        if req_etag == etag {
+            return format!(r#"{{"unchanged":true,"etag":"{}"}}"#, json_escape(&etag));
+        }
+        return format!(
+            r#"{{"status":"no_conversation","etag":"{}","settings":{}}}"#,
+            json_escape(&etag),
+            settings_json
+        );
+    }
+
+    let path = transcript_path(&state.app_data, conv);
+
+    let meta = match fs::metadata(&path) {
+        Ok(m) => m,
+        Err(_) => {
+            let etag = format!("{conv}:missing:s{srev}");
+            if req_etag == etag {
+                return format!(r#"{{"unchanged":true,"etag":"{}"}}"#, json_escape(&etag));
+            }
+            return format!(
+                r#"{{"status":"no_transcript","etag":"{}","settings":{}}}"#,
+                json_escape(&etag),
+                settings_json
+            );
+        }
+    };
+
+    let size = meta.len();
+    let mtime_ms = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+
+    let etag = format!("{conv}:{size}:{mtime_ms}:s{srev}");
+    if !req_etag.is_empty() && req_etag == etag {
+        return format!(r#"{{"unchanged":true,"etag":"{}"}}"#, json_escape(&etag));
+    }
+
+    if let Ok(guard) = state.cache.lock() {
+        if let Some((cached_etag, cached_json)) = guard.get(conv) {
+            if cached_etag == &etag {
+                return cached_json.clone();
+            }
+        }
+    }
+
+    if size == 0 {
+        return format!(
+            r#"{{"status":"empty","etag":"{}","settings":{}}}"#,
+            json_escape(&etag),
+            settings_json
+        );
+    }
+
+    let scan = update_chat_scan(state, conv, &path, size, cutoff);
+    let json = format_scan_json(&etag, &settings_json, &scan);
+
+    if let Ok(mut guard) = state.cache.lock() {
+        if guard.len() > 150 {
+            guard.clear();
+        }
+        guard.insert(conv.to_string(), (etag, json.clone()));
+    }
+
+    json
+}
+
+fn format_scan_json(etag: &str, settings_json: &str, scan: &ChatScanSummary) -> String {
+    if !scan.has_context_data {
+        return format!(
+            r#"{{"status":"empty","etag":"{}","settings":{}}}"#,
+            json_escape(etag),
+            settings_json
+        );
+    }
+
+    let msg_total = scan.user_messages.saturating_add(scan.model_messages);
+    let undo_json = match scan.undo_step_index {
+        Some(step) => step.to_string(),
+        None => "null".to_string(),
+    };
+
+    format!(
+        r#"{{"status":"ok","etag":"{}","context_tokens":{},"step_index":{},"message_count":{},"user_messages":{},"model_messages":{},"checkpoint_count":{},"last_checkpoint_step":{},"undo_step_index":{},"compact_in_flight":{},"first_message_at":"{}","last_message_at":"{}","has_delta":{},"delta_tokens":{},"just_compressed":{},"is_busy":{},"turn_finished":{},"settings":{}}}"#,
+        json_escape(etag),
+        scan.context_tokens,
+        scan.latest_step_index,
+        msg_total,
+        scan.user_messages,
+        scan.model_messages,
+        scan.checkpoint_count,
+        scan.last_checkpoint_step,
+        undo_json,
+        scan.compact_in_flight,
+        json_escape(&scan.first_message_at),
+        json_escape(&scan.last_message_at),
+        scan.has_delta,
+        scan.delta_tokens,
+        scan.just_compressed,
+        scan.is_busy,
+        scan.turn_finished,
+        settings_json,
+    )
+}
+
+fn parse_line(b: &[u8]) -> Option<StepMetrics> {
+    let mut m = StepMetrics::default();
+
+    parse_json_object_entries(b, |key, val_slice| {
+        let mut idx = 0;
+        match key.as_str() {
+            "type" if val_slice.first() == Some(&b'"') => {
+                if let Some(s) = parse_string(val_slice, &mut idx) {
+                    m.kind = StepKind::from_str(&s);
+                }
+            }
+            "status" if val_slice.first() == Some(&b'"') => {
+                if let Some(s) = parse_string(val_slice, &mut idx) {
+                    m.status = StepStatus::from_str(&s);
+                }
+            }
+            "created_at" if val_slice.first() == Some(&b'"') => {
+                if let Some(s) = parse_string(val_slice, &mut idx) {
+                    m.created_at = s;
+                }
+            }
+            "step_index" => {
+                if let Some(n) = parse_u64(val_slice, &mut idx) {
+                    m.step_index = n;
+                }
+            }
+            "input_tokens" => {
+                if let Some(n) = parse_u64(val_slice, &mut idx) {
+                    m.input_tokens = n;
+                    m.has_tokens = true;
+                }
+            }
+            "cache_read_tokens" => {
+                if let Some(n) = parse_u64(val_slice, &mut idx) {
+                    m.cache_read_tokens = n;
+                    m.has_tokens = true;
+                }
+            }
+            "output_tokens" => {
+                if let Some(n) = parse_u64(val_slice, &mut idx) {
+                    m.output_tokens = n;
+                }
+            }
+            "content" => {
+                if val_slice.first() == Some(&b'"') {
+                    let mut look = 1;
+                    skip_ws(val_slice, &mut look);
+                    if val_slice.get(look) != Some(&b'"') {
+                        m.has_content = true;
+                    }
+                    if find_subslice(val_slice, b"/compact").is_some()
+                        || find_subslice(val_slice, b"\\u002fcompact").is_some()
+                        || find_subslice(val_slice, b"\\u002Fcompact").is_some()
+                    {
+                        let mut k = 0;
+                        if let Some(txt) = parse_string(val_slice, &mut k) {
+                            m.is_compact_cmd = is_compact_request_text(&txt);
+                        }
+                    }
+                } else if !val_slice.starts_with(b"null") {
+                    m.has_content = true;
+                }
+            }
+            "tool_calls" if val_slice.first() == Some(&b'[') => {
+                let mut look = 1;
+                skip_ws(val_slice, &mut look);
+                if val_slice.get(look) != Some(&b']') {
+                    m.has_tool_calls = true;
+                }
+            }
+            "error"
+                if !val_slice.starts_with(b"null") && !val_slice.starts_with(b"\"\"") =>
+            {
+                m.has_error = true;
+            }
+            _ => {}
+        }
+    })?;
+
+    Some(m)
+}
+
+fn parse_json_u64_field(b: &[u8], target: &str) -> Option<u64> {
+    let mut found = None;
+    parse_json_object_entries(b, |key, val_slice| {
+        if found.is_none() && key == target {
+            let mut idx = 0;
+            found = parse_u64(val_slice, &mut idx);
+        }
+    })?;
+    found
+}
+
+fn parse_settings_store_data(b: &[u8]) -> Option<LoadedStoreData> {
+    let mut data = LoadedStoreData::default();
+    let mut seen_known = false;
+
+    parse_json_object_entries(b, |key, val_slice| {
+        if key == "chats" && val_slice.first() == Some(&b'{') {
+            seen_known = true;
+            let _ = parse_json_object_entries(val_slice, |conv_id, obj| {
+                let mut s = Settings::default();
+                if parse_settings_patch(obj, &mut s)
+                    && conv_id != DRAFT_CONV_ID
+                    && is_valid_conv_id(&conv_id)
+                {
+                    s.auto_compact_threshold = s
+                        .auto_compact_threshold
+                        .clamp(MIN_AUTO_COMPACT_TOKENS, MAX_AUTO_COMPACT_TOKENS);
+                    if !data.chats.contains_key(&conv_id) && data.chats.len() < MAX_STORED_CHATS {
+                        data.chat_order.push(conv_id.clone());
+                        data.chats.insert(conv_id, s);
+                    } else if data.chats.contains_key(&conv_id) {
+                        data.chats.insert(conv_id, s);
+                    }
+                }
+            });
+        } else if key == "draft" && val_slice.first() == Some(&b'{') {
+            seen_known = true;
+            data.draft_updated_at = parse_json_u64_field(val_slice, "updated_at").unwrap_or(0);
+            if data.draft_updated_at > 0 {
+                let mut s = Settings::default();
+                if parse_settings_patch(val_slice, &mut s) {
+                    s.auto_compact_threshold = s
+                        .auto_compact_threshold
+                        .clamp(MIN_AUTO_COMPACT_TOKENS, MAX_AUTO_COMPACT_TOKENS);
+                    data.draft = s;
+                }
+            }
+        } else if key == "cutoffs" && val_slice.first() == Some(&b'{') {
+            seen_known = true;
+            let _ = parse_json_object_entries(val_slice, |conv_id, obj| {
+                if conv_id != DRAFT_CONV_ID && is_valid_conv_id(&conv_id) {
+                    if let (Some(bytes_len), Some(max_step)) = (
+                        parse_json_u64_field(obj, "bytes_len"),
+                        parse_json_u64_field(obj, "max_step"),
+                    ) {
+                        if !data.cutoffs.contains_key(&conv_id)
+                            && data.cutoffs.len() < MAX_REVERT_CUTOFFS
+                        {
+                            data.cutoff_order.push(conv_id.clone());
+                            data.cutoffs.insert(
+                                conv_id,
+                                RevertCutoff {
+                                    bytes_len,
+                                    max_step,
+                                },
+                            );
+                        } else if data.cutoffs.contains_key(&conv_id) {
+                            data.cutoffs.insert(
+                                conv_id,
+                                RevertCutoff {
+                                    bytes_len,
+                                    max_step,
+                                },
+                            );
+                        }
+                    }
+                }
+            });
+        }
+    })?;
+
+    let _ = seen_known;
+    Some(data)
+}
+
+fn parse_json_object_entries<F: FnMut(String, &[u8])>(b: &[u8], mut on_entry: F) -> Option<()> {
+    let mut i = 0;
+    skip_ws(b, &mut i);
+    if b.get(i) != Some(&b'{') {
+        return None;
+    }
+    i += 1;
+    loop {
+        skip_ws(b, &mut i);
+        if b.get(i) == Some(&b'}') {
+            return Some(());
+        }
+        let key = parse_string(b, &mut i)?;
+        skip_ws(b, &mut i);
+        if b.get(i) != Some(&b':') {
+            return None;
+        }
+        i += 1;
+        skip_ws(b, &mut i);
+        let start = i;
+        skip_value(b, &mut i)?;
+        on_entry(key, &b[start..i]);
+        skip_ws(b, &mut i);
+        match b.get(i) {
+            Some(&b',') => i += 1,
+            Some(&b'}') => return Some(()),
+            _ => return None,
+        }
+    }
+}
+
+fn parse_settings_patch(b: &[u8], s: &mut Settings) -> bool {
+    let mut ok = true;
+    let res = parse_json_object_entries(b, |key, val_slice| {
+        let mut idx = 0;
+        match key.as_str() {
+            "auto_compact_threshold" => {
+                if let Some(v) = parse_u64(val_slice, &mut idx) {
+                    s.auto_compact_threshold = v;
+                } else {
+                    ok = false;
+                }
+            }
+            "auto_compact_enabled" => {
+                if let Some(v) = parse_bool(val_slice, &mut idx) {
+                    s.auto_compact_enabled = v;
+                } else {
+                    ok = false;
+                }
+            }
+            _ => {}
+        }
+    });
+    res.is_some() && ok
+}
+
+fn parse_json_string_field(b: &[u8], target: &str) -> Option<String> {
+    let mut found = None;
+    parse_json_object_entries(b, |key, val_slice| {
+        if found.is_none() && key == target && val_slice.first() == Some(&b'"') {
+            let mut idx = 0;
+            found = parse_string(val_slice, &mut idx);
+        }
+    })?;
+    found
+}
+
+fn parse_bool(b: &[u8], i: &mut usize) -> Option<bool> {
+    if b[*i..].starts_with(b"true") {
+        *i += 4;
+        Some(true)
+    } else if b[*i..].starts_with(b"false") {
+        *i += 5;
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn skip_ws(b: &[u8], i: &mut usize) {
+    while *i < b.len() && matches!(b[*i], b' ' | b'\t' | b'\r' | b'\n') {
+        *i += 1;
+    }
+}
+
+fn skip_string(b: &[u8], i: &mut usize) -> Option<()> {
+    if b.get(*i) != Some(&b'"') {
+        return None;
+    }
+    *i += 1;
+    while *i < b.len() {
+        let c = b[*i];
+        *i += 1;
+        if c == b'"' {
+            return Some(());
+        }
+        if c == b'\\' {
+            if *i >= b.len() {
+                return None;
+            }
+            *i += 1;
+        }
+    }
+    None
+}
+
+fn parse_hex4(b: &[u8], i: &mut usize) -> Option<u16> {
+    if *i + 4 > b.len() {
+        return None;
+    }
+    let mut val: u16 = 0;
+    for _ in 0..4 {
+        let d = hex_val(b[*i])? as u16;
+        val = (val << 4) | d;
+        *i += 1;
+    }
+    Some(val)
+}
+
+fn parse_string(b: &[u8], i: &mut usize) -> Option<String> {
+    if b.get(*i) != Some(&b'"') {
+        return None;
+    }
+    *i += 1;
+    let mut out = Vec::with_capacity(24);
+    while *i < b.len() {
+        let c = b[*i];
+        *i += 1;
+        if c == b'"' {
+            return Some(String::from_utf8_lossy(&out).into_owned());
+        }
+        if c == b'\\' {
+            if *i >= b.len() {
+                return None;
+            }
+            let esc = b[*i];
+            *i += 1;
+            match esc {
+                b'"' => out.push(b'"'),
+                b'\\' => out.push(b'\\'),
+                b'/' => out.push(b'/'),
+                b'b' => out.push(0x08),
+                b'f' => out.push(0x0c),
+                b'n' => out.push(b'\n'),
+                b'r' => out.push(b'\r'),
+                b't' => out.push(b'\t'),
+                b'u' => {
+                    let u1 = parse_hex4(b, i)?;
+                    let codepoint = if (0xD800..=0xDBFF).contains(&u1) {
+                        if *i + 2 <= b.len() && b[*i] == b'\\' && b[*i + 1] == b'u' {
+                            *i += 2;
+                            let u2 = parse_hex4(b, i)?;
+                            if (0xDC00..=0xDFFF).contains(&u2) {
+                                0x10000 + (((u1 - 0xD800) as u32) << 10) + ((u2 - 0xDC00) as u32)
+                            } else {
+                                u1 as u32
+                            }
+                        } else {
+                            u1 as u32
+                        }
+                    } else {
+                        u1 as u32
+                    };
+                    if let Some(ch) = char::from_u32(codepoint) {
+                        let mut utf8_buf = [0u8; 4];
+                        out.extend_from_slice(ch.encode_utf8(&mut utf8_buf).as_bytes());
+                    }
+                }
+                other => out.push(other),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    None
+}
+
+fn parse_u64(b: &[u8], i: &mut usize) -> Option<u64> {
+    let start = *i;
+    let mut val: u64 = 0;
+    while *i < b.len() && b[*i].is_ascii_digit() {
+        val = val
+            .saturating_mul(10)
+            .saturating_add((b[*i] - b'0') as u64);
+        *i += 1;
+    }
+    if *i > start { Some(val) } else { None }
+}
+
+fn skip_value(b: &[u8], i: &mut usize) -> Option<()> {
+    skip_ws(b, i);
+    let c = *b.get(*i)?;
+    if c == b'"' {
+        return skip_string(b, i);
+    }
+    if c == b'{' || c == b'[' {
+        *i += 1;
+        let mut depth: usize = 1;
+        while *i < b.len() && depth > 0 {
+            match b[*i] {
+                b'"' => skip_string(b, i)?,
+                b'{' | b'[' => {
+                    depth += 1;
+                    *i += 1;
+                }
+                b'}' | b']' => {
+                    depth -= 1;
+                    *i += 1;
+                }
+                _ => *i += 1,
+            }
+        }
+        return if depth == 0 { Some(()) } else { None };
+    }
+    let start = *i;
+    while *i < b.len() && !matches!(b[*i], b',' | b'}' | b']' | b' ' | b'\t' | b'\r' | b'\n') {
+        *i += 1;
+    }
+    if *i > start { Some(()) } else { None }
+}
+
+fn trim_ascii(mut s: &[u8]) -> &[u8] {
+    while let Some(&first) = s.first() {
+        if first.is_ascii_whitespace() {
+            s = &s[1..];
+        } else {
+            break;
+        }
+    }
+    while let Some(&last) = s.last() {
+        if last.is_ascii_whitespace() {
+            s = &s[..s.len() - 1];
+        } else {
+            break;
+        }
+    }
+    s
+}
+
+fn is_compact_request_text(txt: &str) -> bool {
+    extract_clean_user_text(txt).eq_ignore_ascii_case("/compact")
+}
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() {
+        return Some(0);
+    }
+    haystack.windows(needle.len()).position(|w| w == needle)
+}
+
+fn parse_query(q: &str) -> HashMap<String, String> {
+    let mut map = HashMap::new();
+    for pair in q.split('&') {
+        if pair.is_empty() {
+            continue;
+        }
+        let (k, v) = match pair.split_once('=') {
+            Some((a, b)) => (a, b),
+            None => (pair, ""),
+        };
+        map.insert(url_decode(k), url_decode(v));
+    }
+    map
+}
+
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'+' => {
+                out.push(b' ');
+                i += 1;
+            }
+            b'%' if i + 2 < bytes.len() => {
+                if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                    out.push((h << 4) | l);
+                    i += 3;
+                } else {
+                    out.push(b'%');
+                    i += 1;
+                }
+            }
+            b => {
+                out.push(b);
+                i += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {}
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn compact_request_detection_handles_context_summary_and_large_metadata() {
+        assert!(is_compact_request_text("/compact"));
+        assert!(is_compact_request_text("  /compact \n"));
+        assert!(is_compact_request_text(
+            "<USER_REQUEST>\n/compact\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\n</ADDITIONAL_METADATA>"
+        ));
+        assert!(is_compact_request_text(
+            "<CONTEXT_SUMMARY>\nOld summary\n</CONTEXT_SUMMARY>\n<USER_REQUEST>\n/compact\n</USER_REQUEST>"
+        ));
+        assert!(!is_compact_request_text(
+            "<USER_REQUEST>\nPlease check /compact handling\n</USER_REQUEST>"
+        ));
+
+        // Large >2KB metadata in JSON line must still detect /compact
+        let huge_meta = "x".repeat(2400);
+        let raw_line = format!(
+            r#"{{"step_index":9,"type":"USER_INPUT","status":"DONE","content":"<CONTEXT_SUMMARY>sum</CONTEXT_SUMMARY>\n<USER_REQUEST>\n/compact\n</USER_REQUEST>\n<ADDITIONAL_METADATA>{huge_meta}</ADDITIONAL_METADATA>"}}"#
+        );
+        let parsed = parse_line(raw_line.as_bytes()).unwrap();
+        assert_eq!(parsed.kind, StepKind::UserInput);
+        assert!(parsed.is_compact_cmd);
+
+        assert_eq!(
+            parse_native_sound_settings(br#"{"userSettings":{"enableSoundsForSpecialEvents":true,"agentSoundVolume":75}}"#),
+            (true, 75)
+        );
+        assert_eq!(
+            parse_native_sound_settings(br#"{"userSettings":{}}"#),
+            (false, 100)
+        );
+    }
+
+    #[test]
+    fn notes_json_roundtrip_and_disk_lifecycle() {
+        let mut dir = env::temp_dir();
+        dir.push(format!("antimetro_test_notes_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let conv = "f7a802c6-bf8d-4297-9f13-0b9b1f90c5f0";
+        let empty = read_notes_data(&dir, conv).unwrap();
+        assert!(empty.is_empty());
+
+        let payload = br#"{"conversationId":"f7a802c6-bf8d-4297-9f13-0b9b1f90c5f0","draft":"Line 1\nCaf\u00e9 \"world\" \uD83D\uDE80","cards":[{"id":1,"text":"Card one","pinned":true},{"id":2,"text":"Second \u00fcber card"}],"next_id":3}"#;
+        let parsed = parse_notes_data(payload).unwrap();
+        assert_eq!(parsed.draft, "Line 1\nCafé \"world\" 🚀");
+        assert_eq!(parsed.cards.len(), 2);
+        assert_eq!(
+            parsed.cards[0],
+            NoteCard {
+                id: 1,
+                text: "Card one".to_string(),
+                pinned: true,
+            }
+        );
+        assert_eq!(
+            parsed.cards[1],
+            NoteCard {
+                id: 2,
+                text: "Second über card".to_string(),
+                pinned: false,
+            }
+        );
+        assert_eq!(parsed.next_id, 3);
+
+        write_notes_data(&dir, conv, &parsed).unwrap();
+        assert_eq!(read_notes_data(&dir, conv).unwrap(), parsed);
+
+        // Corrupt file is backed up to .json.bak before returning clean default
+        let note_file = note_path_for(&dir, conv).unwrap();
+        fs::write(&note_file, b"{broken json").unwrap();
+        assert!(read_notes_data(&dir, conv).unwrap().is_empty());
+        assert!(note_file.with_extension("json.bak").exists());
+
+        // Clearing draft and cards removes the file cleanly
+        write_notes_data(&dir, conv, &NotesData { next_id: 3, ..Default::default() }).unwrap();
+        assert!(!note_path_for(&dir, conv).unwrap().exists());
+        assert!(read_notes_data(&dir, conv).unwrap().is_empty());
+
+        // Traversal attempt rejected
+        assert!(write_notes_data(&dir, "../evil", &parsed).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn search_transcript_handles_unicode_multiword_rewind_and_archived_flag() {
+        let mut dir = env::temp_dir();
+        dir.push(format!("antimetro_test_search_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let conv = "f7a802c6-bf8d-4297-9f13-0b9b1f90c5f0";
+        let t_path = transcript_path(&dir, conv);
+        fs::create_dir_all(t_path.parent().unwrap()).unwrap();
+
+        let lines = concat!(
+            r#"{"step_index":0,"type":"USER_INPUT","status":"DONE","created_at":"2026-11-20T10:00:00Z","content":"<USER_REQUEST>\nDiscuss Façade and palette\n</USER_REQUEST>\n<ADDITIONAL_METADATA>\nsecret_meta\n</ADDITIONAL_METADATA>"}"#, "\n",
+            r#"{"step_index":1,"type":"GENERIC","status":"DONE","created_at":"2026-11-20T10:00:02Z","content":"façade raw tool output"}"#, "\n",
+            r#"{"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-20T10:00:05Z","content":"Old reply about façade before retry"}"#, "\n",
+            r#"{"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-20T10:00:06Z","content":"New reply about FAÇADE after retry"}"#, "\n",
+            r#"{"step_index":3,"type":"USER_INPUT","status":"DONE","created_at":"2026-11-20T10:01:00Z","content":"/compact"}"#, "\n",
+            r#"{"step_index":4,"type":"CHECKPOINT","status":"DONE","created_at":"2026-11-20T10:01:05Z","content":"Summary: approved façade and palette"}"#, "\n",
+            r#"{"step_index":5,"type":"USER_INPUT","status":"DONE","created_at":"2026-11-20T10:02:00Z","content":"<USER_REQUEST>\nCheck the façade on dark theme again\n</USER_REQUEST>"}"#, "\n"
+        );
+        fs::write(&t_path, lines).unwrap();
+
+        // Must ignore metadata wrapper
+        let (meta_res, meta_total) = search_transcript(&t_path, "secret_meta", None);
+        assert_eq!(meta_total, 0);
+        assert!(meta_res.is_empty());
+
+        // Case-insensitive Unicode across user, planner, and checkpoint, ignoring GENERIC and overwritten step 2
+        let (res, total) = search_transcript(&t_path, "façade", None);
+        assert_eq!(total, 4);
+        assert_eq!(res.len(), 4);
+        assert_eq!(res[0].step_index, 5);
+        assert_eq!(res[0].role, "user");
+        assert!(!res[0].archived);
+        assert_eq!(res[1].step_index, 4);
+        assert_eq!(res[1].role, "summary");
+        assert!(!res[1].archived);
+        assert_eq!(res[2].step_index, 2);
+        assert_eq!(res[2].role, "agent");
+        assert!(res[2].archived);
+        assert!(res[2].text.contains("after retry"));
+        assert_eq!(res[3].step_index, 0);
+        assert_eq!(res[3].role, "user");
+        assert!(res[3].archived);
+
+        // Multi-word out-of-order search ("theme façade" matches "façade on dark theme")
+        let (mw_res, mw_total) = search_transcript(&t_path, "theme façade", None);
+        assert_eq!(mw_total, 1);
+        assert_eq!(mw_res[0].step_index, 5);
+
+        // Quoted exact phrase search ("theme façade" in quotes does NOT match)
+        let (_, exact_total) = search_transcript(&t_path, "\"theme façade\"", None);
+        assert_eq!(exact_total, 0);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn undo_step_tracks_pre_compact_and_clears_on_next_user_turn() {
+        let mut st = ChatScanState::default();
+
+        push_step_to_scan(&mut st, StepMetrics {
+            step_index: 10,
+            kind: StepKind::UserInput,
+            status: StepStatus::Done,
+            ..Default::default()
+        });
+        push_step_to_scan(&mut st, StepMetrics {
+            step_index: 11,
+            kind: StepKind::PlannerResponse,
+            status: StepStatus::Done,
+            has_content: true,
+            has_tokens: true,
+            cache_read_tokens: 200_000,
+            input_tokens: 5_000,
+            ..Default::default()
+        });
+        assert_eq!(st.undo_step_index, None);
+        assert!(st.has_delta);
+        assert_eq!(st.delta_tokens, 205_000);
+
+        // /compact + internal system message + CHECKPOINT
+        push_step_to_scan(&mut st, StepMetrics {
+            step_index: 12,
+            kind: StepKind::UserInput,
+            status: StepStatus::Done,
+            is_compact_cmd: true,
+            ..Default::default()
+        });
+        assert!(st.compact_in_flight);
+        push_step_to_scan(&mut st, StepMetrics {
+            step_index: 13,
+            kind: StepKind::SystemMessage,
+            status: StepStatus::Done,
+            ..Default::default()
+        });
+        push_step_to_scan(&mut st, StepMetrics {
+            step_index: 14,
+            kind: StepKind::Checkpoint,
+            status: StepStatus::Done,
+            output_tokens: 18_000,
+            ..Default::default()
+        });
+        assert!(!st.compact_in_flight);
+        assert!(st.just_compressed);
+        assert_eq!(st.undo_step_index, Some(11));
+        assert!(st.has_delta);
+        assert_eq!(st.delta_tokens, -187_000);
+        assert_eq!(st.user_messages, 1);
+
+        // Subsequent normal user message disables undo and unlocks Compact now
+        push_step_to_scan(&mut st, StepMetrics {
+            step_index: 15,
+            kind: StepKind::UserInput,
+            status: StepStatus::Done,
+            ..Default::default()
+        });
+        assert_eq!(st.undo_step_index, None);
+        assert!(!st.just_compressed);
+        assert!(st.has_delta);
+        assert_eq!(st.delta_tokens, 0);
+        assert_eq!(st.user_messages, 2);
+
+        // Cancelled or errored tool call step must NOT leave is_busy stuck true
+        push_step_to_scan(&mut st, StepMetrics {
+            step_index: 16,
+            kind: StepKind::PlannerResponse,
+            status: StepStatus::FailedOrCancelled,
+            has_tool_calls: true,
+            ..Default::default()
+        });
+        assert!(!st.is_busy);
+
+        // Historical step rewind discards overwritten branch cleanly
+        push_step_to_scan(&mut st, StepMetrics {
+            step_index: 12,
+            kind: StepKind::UserInput,
+            status: StepStatus::Done,
+            ..Default::default()
+        });
+        assert_eq!(st.user_messages, 2);
+        assert_eq!(st.checkpoint_count, 0);
+        assert_eq!(st.context_tokens, 205_000);
+    }
+
+    #[test]
+    fn undo_cutoff_hides_reverted_checkpoint_until_new_steps_arrive() {
+        let mut dir = env::temp_dir();
+        dir.push(format!("antimetro_test_cutoff_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let conv = "f7a802c6-bf8d-4297-9f13-0b9b1f90c5f0";
+        let t_path = transcript_path(&dir, conv);
+        fs::create_dir_all(t_path.parent().unwrap()).unwrap();
+
+        let initial_lines = concat!(
+            r#"{"step_index":0,"type":"USER_INPUT","status":"DONE","created_at":"2026-11-20T10:00:00Z","content":"hi"}"#, "\n",
+            r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-20T10:00:05Z","input_tokens":5000,"cache_read_tokens":200000,"content":"ok"}"#, "\n",
+            r#"{"step_index":2,"type":"USER_INPUT","status":"DONE","created_at":"2026-11-20T10:01:00Z","content":"/compact"}"#, "\n",
+            r#"{"step_index":3,"type":"CHECKPOINT","status":"DONE","created_at":"2026-11-20T10:01:05Z","output_tokens":4200}"#, "\n"
+        );
+        fs::write(&t_path, initial_lines).unwrap();
+        let bytes_len = fs::metadata(&t_path).unwrap().len();
+
+        let state = AppState {
+            app_data: dir.clone(),
+            notes_dir: dir.join("notes"),
+            token: None,
+            default_conv: None,
+            ls_address: None,
+            csrf_token: None,
+            preload_js: String::new(),
+            settings: Arc::new(Mutex::new(SettingsStore {
+                chats: HashMap::new(),
+                chat_order: Vec::new(),
+                draft: Settings::default(),
+                draft_updated_at: 0,
+                has_pending_draft: false,
+                cutoffs: HashMap::new(),
+                cutoff_order: Vec::new(),
+                rev: 1,
+                path: dir.join("settings.json"),
+            })),
+            notes_lock: Arc::new(Mutex::new(())),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            scans: Arc::new(Mutex::new(HashMap::new())),
+            chat_titles: Arc::new(Mutex::new((0, HashMap::new()))),
+            search_gen: Arc::new(AtomicUsize::new(0)),
+            done_sound_mp3: Arc::new(OnceLock::new()),
+            active_conns: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let before = update_chat_scan(&state, conv, &t_path, bytes_len, None);
+        assert_eq!(before.context_tokens, 4_200);
+        assert_eq!(before.checkpoint_count, 1);
+        assert_eq!(before.undo_step_index, Some(1));
+
+        let cutoff = Some(RevertCutoff { bytes_len, max_step: 1 });
+        let after_undo = update_chat_scan(&state, conv, &t_path, bytes_len, cutoff);
+        assert_eq!(after_undo.context_tokens, 205_000);
+        assert_eq!(after_undo.checkpoint_count, 0);
+        assert_eq!(after_undo.undo_step_index, None);
+
+        // Sending a new message after undo appends beyond bytes_len and tracks normally
+        let next_line = r#"{"step_index":2,"type":"USER_INPUT","status":"DONE","created_at":"2026-11-20T10:02:00Z","content":"next"}"#.to_string() + "\n";
+        let mut f = fs::OpenOptions::new().append(true).open(&t_path).unwrap();
+        f.write_all(next_line.as_bytes()).unwrap();
+        let new_len = fs::metadata(&t_path).unwrap().len();
+
+        let after_msg = update_chat_scan(&state, conv, &t_path, new_len, cutoff);
+        assert_eq!(after_msg.user_messages, 2);
+        assert_eq!(after_msg.checkpoint_count, 0);
+        assert_eq!(after_msg.context_tokens, 205_000);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn draft_promotes_to_new_chat_without_touching_existing_chat() {
+        let mut dir = env::temp_dir();
+        dir.push(format!("antimetro_test_draft_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let old_conv = "11111111-1111-1111-1111-111111111111";
+        let new_conv = "22222222-2222-2222-2222-222222222222";
+        let old_t = transcript_path(&dir, old_conv);
+        fs::create_dir_all(old_t.parent().unwrap()).unwrap();
+        fs::write(
+            &old_t,
+            concat!(
+                r#"{"step_index":0,"type":"USER_INPUT","status":"DONE","content":"a"}"#, "\n",
+                r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","content":"b"}"#, "\n",
+                r#"{"step_index":2,"type":"USER_INPUT","status":"DONE","content":"c"}"#, "\n"
+            ),
+        ).unwrap();
+
+        let state = AppState {
+            app_data: dir.clone(),
+            notes_dir: dir.join("notes"),
+            token: None,
+            default_conv: None,
+            ls_address: None,
+            csrf_token: None,
+            preload_js: String::new(),
+            settings: Arc::new(Mutex::new(SettingsStore {
+                chats: HashMap::new(),
+                chat_order: Vec::new(),
+                draft: Settings::default(),
+                draft_updated_at: 0,
+                has_pending_draft: false,
+                cutoffs: HashMap::new(),
+                cutoff_order: Vec::new(),
+                rev: 1,
+                path: dir.join("settings.json"),
+            })),
+            notes_lock: Arc::new(Mutex::new(())),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            scans: Arc::new(Mutex::new(HashMap::new())),
+            chat_titles: Arc::new(Mutex::new((0, HashMap::new()))),
+            search_gen: Arc::new(AtomicUsize::new(0)),
+            done_sound_mp3: Arc::new(OnceLock::new()),
+            active_conns: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let (st1, _) = handle_post_settings(&state, br#"{"conversationId":"","auto_compact_enabled":true,"auto_compact_threshold":210000}"#);
+        assert_eq!(st1, 200);
+        let (st2, _) = handle_post_notes(&state, br#"{"conversationId":"","draft":"Draft prompt","cards":[{"id":1,"text":"Saved card"}],"next_id":2}"#);
+        assert_eq!(st2, 200);
+
+        // Opening old multi-message chat must NOT steal the draft
+        maybe_promote_draft(&state, old_conv);
+        assert!(read_notes_data(&state.notes_dir, old_conv).unwrap().is_empty());
+        assert_eq!(read_notes_data(&state.notes_dir, DRAFT_CONV_ID).unwrap().draft, "Draft prompt");
+
+        // Opening new chat promotes both settings and notes (draft + cards) and clears draft
+        maybe_promote_draft(&state, new_conv);
+        let promoted_notes = read_notes_data(&state.notes_dir, new_conv).unwrap();
+        assert_eq!(promoted_notes.draft, "Draft prompt");
+        assert_eq!(promoted_notes.cards.len(), 1);
+        assert_eq!(promoted_notes.cards[0].text, "Saved card");
+        assert!(read_notes_data(&state.notes_dir, DRAFT_CONV_ID).unwrap().is_empty());
+        let store = state.settings.lock().unwrap();
+        let promoted = store.get_for_chat(new_conv);
+        assert!(promoted.auto_compact_enabled);
+        assert_eq!(promoted.auto_compact_threshold, 210_000);
+        assert!(!store.get_for_chat("").auto_compact_enabled);
+        assert!(!store.has_pending_draft);
+
+        drop(store);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn stale_untouched_draft_uses_current_default_250k_and_loopback_validation_works() {
+        let legacy = br#"{"chats":{},"draft":{"auto_compact_enabled":false,"auto_compact_threshold":300000,"updated_at":0},"cutoffs":{}}"#;
+        let parsed = parse_settings_store_data(legacy).unwrap();
+        assert_eq!(parsed.draft, Settings::default());
+        assert_eq!(parsed.draft.auto_compact_threshold, 250_000);
+        assert_eq!(parsed.draft_updated_at, 0);
+
+        let custom = br#"{"chats":{},"draft":{"auto_compact_enabled":false,"auto_compact_threshold":300000,"updated_at":1700000000},"cutoffs":{}}"#;
+        let parsed_custom = parse_settings_store_data(custom).unwrap();
+        assert_eq!(parsed_custom.draft.auto_compact_threshold, 300_000);
+        assert_eq!(parsed_custom.draft_updated_at, 1_700_000_000);
+
+        assert!(is_loopback_host_authority("127.0.0.1:18765"));
+        assert!(is_loopback_host_authority("localhost:5387"));
+        assert!(is_loopback_host_authority("[::1]:5387"));
+        assert!(!is_loopback_host_authority("evil.com:80"));
+        assert!(!is_loopback_host_authority("127.0.0.1:80\r\nX-Injected: 1"));
+    }
+
+    #[test]
+    fn multiword_search_ranks_exact_and_close_matches_and_picks_tightest_snippet() {
+        let mut dir = env::temp_dir();
+        dir.push(format!("antimetro_test_rank_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let conv = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let t_path = transcript_path(&dir, conv);
+        fs::create_dir_all(t_path.parent().unwrap()).unwrap();
+
+        let filler = "word ".repeat(80); // 400 chars
+        let lines = format!(
+            concat!(
+                r#"{{"step_index":0,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-20T10:00:00Z","content":"Older exact deploy pipeline match"}}"#, "\n",
+                r#"{{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-21T10:00:00Z","content":"deploy {filler} far away pipeline {filler} but here pipeline and deploy stand close together"}}"#, "\n",
+                r#"{{"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-22T10:00:00Z","content":"Newest message with deploy {filler} and much later pipeline"}}"#, "\n"
+            ),
+            filler = filler
+        );
+        fs::write(&t_path, lines).unwrap();
+
+        let (res, total) = search_transcript(&t_path, "deploy pipeline", None);
+        assert_eq!(total, 3);
+        assert_eq!(res.len(), 3);
+        // Tier 0 (exact phrase) comes first even though it is older
+        assert_eq!(res[0].step_index, 0);
+        assert_eq!(res[0].rank, 0);
+        // Tier 1 (close proximity) comes second and snippet targets the tight window
+        assert_eq!(res[1].step_index, 1);
+        assert_eq!(res[1].rank, 1);
+        assert!(res[1].snippet.contains("pipeline and deploy stand close"));
+        // Tier 2 (scattered) comes last despite being the newest
+        assert_eq!(res[2].step_index, 2);
+        assert_eq!(res[2].rank, 2);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn all_chats_search_merges_titles_current_badge_and_ranking() {
+        let mut dir = env::temp_dir();
+        dir.push(format!("antimetro_test_all_search_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let conv_a = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa";
+        let conv_b = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb";
+        let path_a = transcript_path(&dir, conv_a);
+        let path_b = transcript_path(&dir, conv_b);
+        fs::create_dir_all(path_a.parent().unwrap()).unwrap();
+        fs::create_dir_all(path_b.parent().unwrap()).unwrap();
+
+        fs::write(
+            &path_a,
+            concat!(
+                r#"{"step_index":0,"type":"USER_INPUT","status":"DONE","created_at":"2026-11-20T10:00:00Z","content":"<USER_REQUEST>\nConfigure plugin build\n</USER_REQUEST>"}"#, "\n",
+                r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-20T10:01:00Z","content":"Build release archive for Linux"}"#, "\n"
+            ),
+        )
+        .unwrap();
+        fs::write(
+            &path_b,
+            concat!(
+                r#"{"step_index":0,"type":"USER_INPUT","status":"DONE","created_at":"2026-11-22T12:00:00Z","content":"<USER_REQUEST>\nVerify release archive for macOS\n</USER_REQUEST>"}"#, "\n"
+            ),
+        )
+        .unwrap();
+
+        let mut titles = HashMap::new();
+        titles.insert(conv_a.to_string(), "Linux Release Chat".to_string());
+        let cutoffs = HashMap::new();
+
+        let (res, total) = search_all_transcripts(&dir, conv_b, "release", &cutoffs, &titles, None);
+        assert_eq!(total, 2);
+        assert_eq!(res.len(), 2);
+        assert_eq!(res[0].conv_id, conv_b);
+        assert!(res[0].is_current);
+        assert_eq!(res[0].chat_title, "Verify release archive for macOS");
+        assert_eq!(res[1].conv_id, conv_a);
+        assert!(!res[1].is_current);
+        assert_eq!(res[1].chat_title, "Linux Release Chat");
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+}
