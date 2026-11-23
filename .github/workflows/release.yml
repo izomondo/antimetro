@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -89,8 +89,79 @@ jobs:
           cp "NOTICE" "dist/NOTICE"
           tar -czf "${{ matrix.artifact }}.tar.gz" -C dist .
 
-      - name: Attach archive to GitHub Release
-        if: startsWith(github.ref, 'refs/tags/v')
-        uses: softprops/action-gh-release@v2
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v6
         with:
-          files: "${{ matrix.artifact }}.${{ matrix.ext }}"
+          name: ${{ matrix.artifact }}
+          path: "${{ matrix.artifact }}.${{ matrix.ext }}"
+          retention-days: 1
+
+  release:
+    name: Publish GitHub Release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Download all platform archives
+        uses: actions/download-artifact@v7
+        with:
+          path: release-assets
+          merge-multiple: true
+
+      - name: Extract release notes from CHANGELOG.md
+        shell: bash
+        env:
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, re, pathlib
+
+          tag = os.environ["TAG_NAME"].strip()
+          repo = os.environ["GITHUB_REPOSITORY"].strip()
+          changelog = pathlib.Path("CHANGELOG.md")
+          notes = ""
+
+          if changelog.is_file():
+              lines = changelog.read_text(encoding="utf-8").splitlines()
+              header_re = re.compile(r"^##\s+" + re.escape(tag) + r"(?:\b|\s|$)")
+              capture = False
+              buf = []
+              for line in lines:
+                  if not capture:
+                      if header_re.match(line):
+                          capture = True
+                      continue
+                  if re.match(r"^---\s*$", line) or re.match(r"^##\s+v", line):
+                      break
+                  buf.append(line)
+              notes = "\n".join(buf).strip()
+
+          if notes:
+              notes += f"\n\n---\nFull changelog: [CHANGELOG.md](https://github.com/{repo}/blob/main/CHANGELOG.md)\n"
+              pathlib.Path("release_notes.md").write_text(notes, encoding="utf-8")
+          PY
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          TITLE="Antimetro ${TAG_NAME}"
+          if [ -f release_notes.md ]; then
+            if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+              gh release edit "${TAG_NAME}" --title "${TITLE}" --notes-file release_notes.md
+              gh release upload "${TAG_NAME}" release-assets/* --clobber
+            else
+              gh release create "${TAG_NAME}" release-assets/* --title "${TITLE}" --notes-file release_notes.md
+            fi
+          else
+            if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+              gh release upload "${TAG_NAME}" release-assets/* --clobber
+            else
+              gh release create "${TAG_NAME}" release-assets/* --title "${TITLE}" --generate-notes
+            fi
+          fi
