@@ -11,28 +11,21 @@ permissions:
 
 jobs:
   build:
-    name: Build (${{ matrix.artifact }})
+    name: Build (${{ matrix.label }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
-            artifact: Antimetro-Windows-x64
-            ext: zip
-          - os: macos-latest
-            target: aarch64-apple-darwin
-            artifact: Antimetro-macOS-arm64
-            ext: zip
-          - os: macos-latest
-            target: x86_64-apple-darwin
-            artifact: Antimetro-macOS-x64
-            ext: zip
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-musl
-            artifact: Antimetro-Linux-x64
-            ext: tar.gz
+          - label: Windows-x64
+            os: windows-latest
+            targets: x86_64-pc-windows-msvc
+          - label: macOS-arm64-and-x64
+            os: macos-latest
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+          - label: Linux-x64
+            os: ubuntu-latest
+            targets: x86_64-unknown-linux-musl
 
     steps:
       - name: Checkout repository
@@ -41,45 +34,51 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.targets }}
 
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
-
-      - name: Package Windows archive
+      - name: Build and package Windows (x64)
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Path dist -Force | Out-Null
-          Copy-Item "target/${{ matrix.target }}/release/antimetro.exe" "dist/antimetro.exe"
+          cargo build --release --target x86_64-pc-windows-msvc
+          New-Item -ItemType Directory -Path dist, out -Force | Out-Null
+          Copy-Item "target/x86_64-pc-windows-msvc/release/antimetro.exe" "dist/antimetro.exe"
           Copy-Item "assets/logo.svg" "dist/logo.svg"
           Copy-Item "installers/Install.bat" "dist/Install.bat"
           Copy-Item "installers/Uninstall.bat" "dist/Uninstall.bat"
           Copy-Item "LICENSE" "dist/LICENSE"
           Copy-Item "NOTICE" "dist/NOTICE"
-          Compress-Archive -Path "dist/*" -DestinationPath "${{ matrix.artifact }}.zip" -Force
+          Compress-Archive -Path "dist/*" -DestinationPath "out/Antimetro-Windows-x64.zip" -Force
 
-      - name: Package macOS archive
+      - name: Build and package macOS (arm64 + x64)
         if: startsWith(matrix.os, 'macos')
         shell: bash
         run: |
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/antimetro" "dist/antimetro"
-          chmod +x "dist/antimetro"
-          cp "assets/logo.svg" "dist/logo.svg"
-          cp "installers/Install.command" "dist/Install.command"
-          cp "installers/Uninstall.command" "dist/Uninstall.command"
-          chmod +x "dist/Install.command" "dist/Uninstall.command"
-          cp "LICENSE" "dist/LICENSE"
-          cp "NOTICE" "dist/NOTICE"
-          cd dist && zip -r "../${{ matrix.artifact }}.zip" .
+          mkdir -p out
+          for pair in "aarch64-apple-darwin:Antimetro-macOS-arm64" "x86_64-apple-darwin:Antimetro-macOS-x64"; do
+            target="${pair%%:*}"
+            artifact="${pair##*:}"
+            cargo build --release --target "${target}"
+            rm -rf dist
+            mkdir -p dist
+            cp "target/${target}/release/antimetro" "dist/antimetro"
+            chmod +x "dist/antimetro"
+            cp "assets/logo.svg" "dist/logo.svg"
+            cp "installers/Install.command" "dist/Install.command"
+            cp "installers/Uninstall.command" "dist/Uninstall.command"
+            chmod +x "dist/Install.command" "dist/Uninstall.command"
+            cp "LICENSE" "dist/LICENSE"
+            cp "NOTICE" "dist/NOTICE"
+            (cd dist && zip -r "../out/${artifact}.zip" .)
+          done
 
-      - name: Package Linux archive
+      - name: Build and package Linux (x64 static musl)
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release/antimetro" "dist/antimetro"
+          cargo build --release --target x86_64-unknown-linux-musl
+          mkdir -p dist out
+          cp "target/x86_64-unknown-linux-musl/release/antimetro" "dist/antimetro"
           chmod +x "dist/antimetro"
           cp "assets/logo.svg" "dist/logo.svg"
           cp "installers/Install.command" "dist/install.sh"
@@ -87,13 +86,13 @@ jobs:
           chmod +x "dist/install.sh" "dist/uninstall.sh"
           cp "LICENSE" "dist/LICENSE"
           cp "NOTICE" "dist/NOTICE"
-          tar -czf "${{ matrix.artifact }}.tar.gz" -C dist .
+          tar -czf "out/Antimetro-Linux-x64.tar.gz" -C dist .
 
-      - name: Upload build artifact
+      - name: Upload build artifacts
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ matrix.artifact }}
-          path: "${{ matrix.artifact }}.${{ matrix.ext }}"
+          name: ${{ matrix.label }}
+          path: out/*
           retention-days: 1
 
   release:
