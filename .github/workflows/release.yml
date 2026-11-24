@@ -1,4 +1,5 @@
 name: Release Binaries
+run-name: "Release Antimetro ${{ github.ref_name }}"
 
 on:
   push:

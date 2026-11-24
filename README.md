@@ -2,19 +2,19 @@
 
 **Live context token meter, smart auto-compact, per-chat notes, and full transcript search for Antigravity App 2.0.**
 
-Tested on **Antigravity App 2.0 (v2.34.0)** · Built with pure **Rust** (`0` external crates, ~551 KB binary) · By **[izomondo](https://izomondo.com)**
+Tested on **Antigravity App 2.0 (v2.34.0)** · Built with pure **Rust** (`0` external crates, ~599 KB binary) · By **[izomondo](https://izomondo.com)**
 
 <table>
   <tr>
     <td align="center" valign="top" width="50%">
       <img src="assets/screenshot-notes-light.png" alt="Antimetro — Live token meter and per-chat Notes (Light theme)" width="360" />
       <br />
-      <sub><b>Light theme:</b> Live token meter, Auto-compact (250K), and per-chat <b>Notes</b> cards</sub>
+      <sub><b>Light theme:</b> Live token meter with draggable threshold pin and card-first <b>Notes</b></sub>
     </td>
     <td align="center" valign="top" width="50%">
-      <img src="assets/screenshot-search-dark.png" alt="Antimetro — Full-chat Search including pre-compact messages (Dark theme)" width="360" />
+      <img src="assets/screenshot-search-dark.png" alt="Antimetro — Global Search across chats, archive, and notes (Dark theme)" width="360" />
       <br />
-      <sub><b>Dark theme:</b> Instant <b>Search</b> across <code>You</code>, <code>Agent</code>, <code>Summary</code>, and <code>before compact</code> history</sub>
+      <sub><b>Dark theme:</b> Instant <b>Search</b> across all chats, archive, notes, and <code>before compact</code> history</sub>
     </td>
   </tr>
 </table>
@@ -34,9 +34,9 @@ When a chat grows past **150K–200K tokens**:
 - **Exact live token count** (`cache_read_tokens + input_tokens` read directly from the local conversation transcript, excluding `/compact` commands from `Your messages`).
 - **Full-session token delta** (`+20 345 / session` from the very first reply across all tool calls and background tasks, switching cleanly to `-N / session` right after compaction to show freed tokens) plus an animated progress-bar flow while the model is busy.
 - **1-click manual compaction & safe Undo** (`Compact now` button with centered `Working...` -> `Done!` status, active-turn and post-compaction lock to prevent accidental double-compaction until your next message, plus a round Undo button right next to `Compact now` — playing Antigravity's native completion sound according to your app sound settings — until your next message so you can revert an accidental compaction without touching any code files).
-- **Per-chat smart Auto-compact** (`Auto-compact after [ 250 ] K` — remembered individually for each chat, even after archiving, and triggers 1 second after the model finishes its reply).
-- **Per-chat `Notes` & Pinned Cards** — expands up to `1000px` and fills the remaining panel height with Zed-style auto-save (`1.5s` delay + instant flush on focus loss or chat switch), 1-click `+` (or `Ctrl+Enter` / `Cmd+Enter`) to save the current note as a standalone 5-line card below, **Pin** with smooth animated reordering to anchor key cards at the top of the list, subtle bottom-edge fade for longer cards, smooth click-to-expand editing with auto-collapse on outside click, left dot-rail navigation on overflow, and safe two-step delete confirmation (`Check` / `X`). Works right away even in a brand-new empty chat before your first message, seamlessly carrying over your draft notes, cards, and Auto-compact settings once the chat starts.
-- **`Search` (`This` / `All` chats)** — press `Ctrl+F` (`Cmd+F`) anytime to search across the active conversation or all recent local chats (up to `200` transcripts with conversation titles and active-chat markers), covering `You`, `Agent`, and past compaction summaries—including older messages hidden after `/compact` (`before compact`). Supports multi-word out-of-order matching with exact-phrase & proximity ranking, `"quoted"` exact phrases, best-window snippets with highlighted terms, smooth click-to-expand full message view, and 1-click full message copy.
+- **Per-chat smart Auto-compact with draggable pin** (`Auto-compact after [ 250 ] K` — drag the circular threshold handle right on the token bar in `10K` steps from `10K` to `500K`, remembered individually per chat even after archiving, and triggers safely 1 second after the model finishes its reply and background tasks).
+- **Card-first `Notes` & Pinned Cards** — edit directly inside cards with Zed-style auto-save (`1.5s` delay + instant flush on focus loss or chat switch) and a per-card save dot next to `Pin`. When a chat has `0` or `1` note, it stays stretched to the bottom of the panel until you add a second card via `+`. Supports **Pin** with smooth animated reordering, subtle bottom fade on longer collapsed cards, active-card blue focus border, unified seamless wheel scrolling across expanded cards and the list, animated left dot-rail navigation, and safe two-step delete confirmation (`Check` / `X`). Works immediately in brand-new empty chats before your first message.
+- **Global `Search` across all chats, archive & notes** — press `Ctrl+F` (`Cmd+F`) anytime to slide open the search drawer. Searches across up to `500` recent local chats (including archived conversations marked `· archived`) **plus** your saved **Notes** (`Note` badge), covering `You`, `Agent`, and past compaction summaries—including older messages hidden after `/compact` (`before compact`). Toggle the right-hand scan icon to narrow strictly to the active chat. Supports multi-word out-of-order matching with exact-phrase & proximity ranking, `"quoted"` exact phrases, inline amber match count, match-centered card expansion with unified smooth scrolling, and 1-click full copy.
 - **Native theme, accent & UI polish** — automatically matches your Antigravity theme and `Appearance -> Accent` color, complete with Antigravity-style pill tooltips, context menus, and auto-hiding scrollbars.
 - **100% local & private** — zero network requests outside `127.0.0.1`, zero telemetry, zero external dependencies.
 

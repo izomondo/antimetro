@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const UI_HTML: &str = include_str!("ui.html");
 const FALLBACK_PRELOAD: &str = r#"(function(){const p=new URLSearchParams(location.search);const t=p.get('token');window.sidecar={conversationId:p.get('conversationId')||'',fetch:(u,o={})=>{const h=new Headers(o.headers||{});if(o.method&&o.method!=='GET')h.set('Content-Type','application/json');if(t)h.set('X-Sidecar-Token',t);return fetch(u,{...o,headers:h});}};})();"#;
@@ -20,7 +20,7 @@ const MAX_ACTIVE_CONNECTIONS: usize = 32;
 const MAX_NOTE_BYTES: usize = 256 * 1024;
 const MAX_NOTE_CARDS: usize = 200;
 const MAX_SEARCH_RESULTS: usize = 60;
-const MAX_ALL_SEARCH_CHATS: usize = 200;
+const MAX_ALL_SEARCH_CHATS: usize = 500;
 const MAX_SEARCH_TEXT_CHARS: usize = 12_000;
 const SEARCH_CLOSE_SPAN_CHARS: usize = 160;
 const MAX_BODY_BYTES: usize = 512 * 1024;
@@ -180,6 +180,7 @@ struct ChatScanSummary {
     delta_tokens: i64,
     just_compressed: bool,
     is_busy: bool,
+    has_bg_work: bool,
     turn_finished: bool,
 }
 
@@ -188,6 +189,8 @@ struct ChatScanState {
     offset: u64,
     cutoff_applied: Option<RevertCutoff>,
     steps: Vec<StepMetrics>,
+    active_bg_tasks: Vec<String>,
+    active_subagents: Vec<String>,
     user_messages: u64,
     model_messages: u64,
     checkpoint_count: u64,
@@ -210,12 +213,13 @@ struct ChatScanState {
 
 impl ChatScanState {
     fn to_summary(&self) -> ChatScanSummary {
+        let has_bg_work = !self.active_bg_tasks.is_empty() || !self.active_subagents.is_empty();
         ChatScanSummary {
             user_messages: self.user_messages,
             model_messages: self.model_messages,
             checkpoint_count: self.checkpoint_count,
             last_checkpoint_step: self.last_checkpoint_step,
-            undo_step_index: self.undo_step_index,
+            undo_step_index: if has_bg_work { None } else { self.undo_step_index },
             compact_in_flight: self.compact_in_flight,
             first_message_at: self.first_message_at.clone(),
             last_message_at: self.last_message_at.clone(),
@@ -225,8 +229,9 @@ impl ChatScanState {
             has_delta: self.has_delta,
             delta_tokens: self.delta_tokens,
             just_compressed: self.just_compressed,
-            is_busy: self.is_busy,
-            turn_finished: self.turn_finished,
+            is_busy: self.is_busy || has_bg_work,
+            has_bg_work,
+            turn_finished: self.turn_finished && !has_bg_work,
         }
     }
 }
@@ -285,6 +290,20 @@ impl StepStatus {
     }
 }
 
+#[derive(Default, Clone)]
+struct LsLiveCache {
+    fetched_at: Option<Instant>,
+    running_convs: HashMap<String, bool>,
+    bg_convs: Vec<String>,
+}
+
+#[derive(Default, Clone, Copy)]
+struct LsLiveConvStatus {
+    known: bool,
+    is_running: bool,
+    has_bg_task: bool,
+}
+
 #[derive(Clone)]
 struct AppState {
     app_data: PathBuf,
@@ -299,6 +318,7 @@ struct AppState {
     cache: Arc<Mutex<HashMap<String, (String, String)>>>,
     scans: Arc<Mutex<HashMap<String, ChatScanState>>>,
     chat_titles: Arc<Mutex<(u64, HashMap<String, String>)>>,
+    ls_live: Arc<Mutex<LsLiveCache>>,
     search_gen: Arc<AtomicUsize>,
     done_sound_mp3: Arc<OnceLock<Vec<u8>>>,
     active_conns: Arc<AtomicUsize>,
@@ -318,6 +338,11 @@ struct StepMetrics {
     has_tool_calls: bool,
     has_error: bool,
     is_compact_cmd: bool,
+    bg_task_started: Option<String>,
+    bg_task_ended: Option<String>,
+    subagent_started: Vec<String>,
+    subagent_ended: Option<String>,
+    clears_all_subagents: bool,
 }
 
 impl StepMetrics {
@@ -382,6 +407,7 @@ fn main() {
         cache: Arc::new(Mutex::new(HashMap::new())),
         scans: Arc::new(Mutex::new(HashMap::new())),
         chat_titles: Arc::new(Mutex::new((0, HashMap::new()))),
+        ls_live: Arc::new(Mutex::new(LsLiveCache::default())),
         search_gen: Arc::new(AtomicUsize::new(0)),
         done_sound_mp3: Arc::new(OnceLock::new()),
         active_conns: Arc::new(AtomicUsize::new(0)),
@@ -1409,7 +1435,8 @@ fn handle_post_compact(state: &AppState, body: &[u8]) -> (u16, String) {
         .lock()
         .ok()
         .and_then(|s| s.cutoffs.get(&conv).copied());
-    let scan = update_chat_scan(state, &conv, &path, meta.len(), cutoff);
+    let mut scan = update_chat_scan(state, &conv, &path, meta.len(), cutoff);
+    apply_ls_live_to_summary(&mut scan, resolve_ls_live_status(state, &conv));
     if !scan.has_context_data {
         return (200, r#"{"ok":false,"error":"Nothing to compact yet"}"#.to_string());
     }
@@ -1478,7 +1505,8 @@ fn handle_post_undo_compact(state: &AppState, body: &[u8]) -> (u16, String) {
         .lock()
         .ok()
         .and_then(|s| s.cutoffs.get(&conv).copied());
-    let scan = update_chat_scan(state, &conv, &path, meta.len(), cutoff);
+    let mut scan = update_chat_scan(state, &conv, &path, meta.len(), cutoff);
+    apply_ls_live_to_summary(&mut scan, resolve_ls_live_status(state, &conv));
     if scan.is_busy {
         return (
             200,
@@ -1724,6 +1752,16 @@ fn decode_chunked_body(raw: &[u8]) -> Vec<u8> {
     }
 }
 
+fn ls_connect_addr(host_port: &str) -> String {
+    if let Some(port) = host_port.strip_prefix("localhost:") {
+        format!("127.0.0.1:{port}")
+    } else if let Some(port) = host_port.strip_prefix("LOCALHOST:") {
+        format!("127.0.0.1:{port}")
+    } else {
+        host_port.to_string()
+    }
+}
+
 fn ls_http_request_with_cap(
     host_port: &str,
     req: &str,
@@ -1731,7 +1769,8 @@ fn ls_http_request_with_cap(
     init_cap: usize,
     max_cap: usize,
 ) -> Result<(u16, Vec<u8>), String> {
-    let mut stream = TcpStream::connect(host_port)
+    let connect_addr = ls_connect_addr(host_port);
+    let mut stream = TcpStream::connect(&connect_addr)
         .map_err(|e| format!("Failed to connect to LS ({host_port}): {e}"))?;
     let _ = stream.set_read_timeout(Some(timeout));
     let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
@@ -1833,27 +1872,160 @@ fn post_ls_json(
     Ok((status, body_text))
 }
 
-fn parse_trajectory_titles_json(b: &[u8]) -> HashMap<String, String> {
+fn parse_trajectories_live_json(b: &[u8]) -> (HashMap<String, String>, HashMap<String, bool>) {
     let mut titles = HashMap::new();
+    let mut running = HashMap::new();
     let _ = parse_json_object_entries(b, |key, val_slice| {
         if key == "trajectorySummaries" && val_slice.first() == Some(&b'{') {
             let _ = parse_json_object_entries(val_slice, |conv_id, obj_slice| {
                 if let Some(summary) = parse_json_string_field(obj_slice, "summary") {
                     let clean = summary.trim().to_string();
                     if !clean.is_empty() {
-                        titles.insert(conv_id, clean);
+                        titles.insert(conv_id.clone(), clean);
                     }
+                }
+                if let Some(status) = parse_json_string_field(obj_slice, "status") {
+                    let is_run = status.contains("RUNNING") || status.contains("CANCELING");
+                    running.insert(conv_id, is_run);
                 }
             });
         }
     });
-    titles
+    (titles, running)
+}
+
+fn parse_bg_tasks_convs_json(b: &[u8]) -> Vec<String> {
+    let mut convs = Vec::new();
+    let _ = parse_json_object_entries(b, |key, val_slice| {
+        if key == "tasks" && val_slice.first() == Some(&b'[') {
+            let mut i = 1usize;
+            loop {
+                skip_ws(val_slice, &mut i);
+                if val_slice.get(i) == Some(&b']') || i >= val_slice.len() {
+                    break;
+                }
+                let start = i;
+                if skip_value(val_slice, &mut i).is_none() {
+                    break;
+                }
+                let elem = &val_slice[start..i];
+                if elem.first() == Some(&b'{') {
+                    if let Some(cid) = parse_json_string_field(elem, "conversationId") {
+                        let task_finished = find_subslice(elem, b"CORTEX_STEP_STATUS_DONE").is_some()
+                            || find_subslice(elem, b"CORTEX_STEP_STATUS_CANCEL").is_some()
+                            || find_subslice(elem, b"CORTEX_STEP_STATUS_ERROR").is_some();
+                        if !task_finished && is_valid_conv_id(&cid) && !convs.contains(&cid) {
+                            convs.push(cid);
+                        }
+                    }
+                }
+                skip_ws(val_slice, &mut i);
+                if val_slice.get(i) == Some(&b',') {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+    });
+    convs
+}
+
+fn resolve_ls_live_status(state: &AppState, conv: &str) -> LsLiveConvStatus {
+    if is_draft_conv(conv) || !is_valid_conv_id(conv) {
+        return LsLiveConvStatus::default();
+    }
+    let Ok((host_port, csrf)) = resolve_ls_creds(state) else {
+        return LsLiveConvStatus::default();
+    };
+
+    if let Ok(guard) = state.ls_live.lock() {
+        if let Some(ts) = guard.fetched_at {
+            if ts.elapsed() < Duration::from_millis(350) {
+                let known = guard.running_convs.contains_key(conv);
+                let is_running = guard.running_convs.get(conv).copied().unwrap_or(false);
+                let has_bg_task = guard.bg_convs.iter().any(|c| c == conv);
+                return LsLiveConvStatus {
+                    known,
+                    is_running,
+                    has_bg_task,
+                };
+            }
+        }
+    }
+
+    let Ok((st_all, all_bytes)) = post_ls_json_bytes(
+        host_port,
+        csrf,
+        "/exa.language_server_pb.LanguageServerService/GetAllCascadeTrajectories",
+        "{}",
+        Duration::from_millis(700),
+        8 * 1024 * 1024,
+    ) else {
+        return LsLiveConvStatus::default();
+    };
+    if !(200..=299).contains(&st_all) || all_bytes.is_empty() {
+        return LsLiveConvStatus::default();
+    }
+    let (titles, running_convs) = parse_trajectories_live_json(&all_bytes);
+    if !titles.is_empty() {
+        if let Ok(mut guard) = state.chat_titles.lock() {
+            guard.0 = unix_now_secs();
+            guard.1 = titles;
+        }
+    }
+
+    let bg_convs = match post_ls_json_bytes(
+        host_port,
+        csrf,
+        "/exa.language_server_pb.LanguageServerService/ListBackgroundTasks",
+        "{}",
+        Duration::from_millis(500),
+        2 * 1024 * 1024,
+    ) {
+        Ok((st_bg, bg_bytes)) if (200..=299).contains(&st_bg) && !bg_bytes.is_empty() => {
+            parse_bg_tasks_convs_json(&bg_bytes)
+        }
+        _ => Vec::new(),
+    };
+
+    let known = running_convs.contains_key(conv);
+    let is_running = running_convs.get(conv).copied().unwrap_or(false);
+    let has_bg_task = bg_convs.iter().any(|c| c == conv);
+
+    if let Ok(mut guard) = state.ls_live.lock() {
+        guard.fetched_at = Some(Instant::now());
+        guard.running_convs = running_convs;
+        guard.bg_convs = bg_convs;
+    }
+
+    LsLiveConvStatus {
+        known,
+        is_running,
+        has_bg_task,
+    }
+}
+
+fn apply_ls_live_to_summary(scan: &mut ChatScanSummary, ls: LsLiveConvStatus) {
+    if !ls.known {
+        return;
+    }
+    if ls.is_running || ls.has_bg_task {
+        scan.is_busy = true;
+        scan.has_bg_work = ls.has_bg_task;
+        scan.turn_finished = false;
+        scan.undo_step_index = None;
+    } else {
+        scan.is_busy = false;
+        scan.has_bg_work = false;
+        scan.compact_in_flight = false;
+    }
 }
 
 fn resolve_chat_titles(state: &AppState) -> HashMap<String, String> {
     let now = unix_now_secs();
     if let Ok(guard) = state.chat_titles.lock() {
-        if !guard.1.is_empty() && now.saturating_sub(guard.0) < 60 {
+        if !guard.1.is_empty() && now.saturating_sub(guard.0) < 5 {
             return guard.1.clone();
         }
     }
@@ -1868,7 +2040,7 @@ fn resolve_chat_titles(state: &AppState) -> HashMap<String, String> {
             8 * 1024 * 1024,
         ) {
             if (200..=299).contains(&status) && !body_bytes.is_empty() {
-                let parsed = parse_trajectory_titles_json(&body_bytes);
+                let (parsed, _) = parse_trajectories_live_json(&body_bytes);
                 if !parsed.is_empty() {
                     if let Ok(mut guard) = state.chat_titles.lock() {
                         guard.0 = now;
@@ -1957,6 +2129,7 @@ struct SearchMatchResult {
     conv_id: String,
     chat_title: String,
     is_current: bool,
+    chat_archived: bool,
     step_index: u64,
     role: &'static str,
     created_at: String,
@@ -2200,14 +2373,23 @@ fn handle_get_search(
             .map(|s| s.cutoffs.clone())
             .unwrap_or_default();
         let titles = resolve_chat_titles(state);
-        search_all_transcripts(
+        let cancel = Some((state.search_gen.as_ref(), my_gen));
+        let skip_notes_conv = if conv.is_empty() { "__draft__" } else { conv };
+        let (mut note_results, note_total) = search_all_notes(
+            &state.notes_dir,
             &state.app_data,
-            conv,
+            skip_notes_conv,
             q_trimmed,
-            &cutoffs,
             &titles,
-            Some((&state.search_gen, my_gen)),
-        )
+            cancel,
+        );
+        let (msg_results, msg_total) =
+            search_all_transcripts(&state.app_data, conv, q_trimmed, &cutoffs, &titles, cancel);
+        note_results.extend(msg_results);
+        if note_results.len() > MAX_SEARCH_RESULTS {
+            note_results.truncate(MAX_SEARCH_RESULTS);
+        }
+        (note_results, note_total.saturating_add(msg_total))
     } else {
         if is_draft_conv(conv) || !is_valid_conv_id(conv) {
             return (200, r#"{"results":[],"total":0}"#.to_string());
@@ -2230,10 +2412,11 @@ fn handle_get_search(
             out.push(',');
         }
         out.push_str(&format!(
-            r#"{{"conv_id":"{}","chat_title":"{}","is_current":{},"step_index":{},"role":"{}","created_at":"{}","archived":{},"snippet":"{}","text":"{}"}}"#,
+            r#"{{"conv_id":"{}","chat_title":"{}","is_current":{},"chat_archived":{},"step_index":{},"role":"{}","created_at":"{}","archived":{},"snippet":"{}","text":"{}"}}"#,
             json_escape(&r.conv_id),
             json_escape(&r.chat_title),
             r.is_current,
+            r.chat_archived,
             r.step_index,
             r.role,
             json_escape(&r.created_at),
@@ -2389,6 +2572,7 @@ fn search_transcript_with_fallback_title(
             conv_id: String::new(),
             chat_title: String::new(),
             is_current: false,
+            chat_archived: false,
             step_index: rec.step_index,
             role: rec.role,
             created_at: rec.created_at,
@@ -2479,10 +2663,12 @@ fn search_all_transcripts(
             .or(fallback_title)
             .unwrap_or_else(|| truncate_chars(&conv_id, 12));
         let is_cur = !current_conv.is_empty() && conv_id == current_conv;
+        let is_chat_archived = !titles.is_empty() && !is_cur && !titles.contains_key(&conv_id);
         for m in &mut chat_matches {
             m.conv_id = conv_id.clone();
             m.chat_title = title.clone();
             m.is_current = is_cur;
+            m.chat_archived = is_chat_archived;
         }
         all_matches.extend(chat_matches);
     }
@@ -2497,6 +2683,169 @@ fn search_all_transcripts(
         all_matches.truncate(MAX_SEARCH_RESULTS);
     }
     (all_matches, grand_total)
+}
+
+fn read_transcript_fallback_title(path: &Path) -> Option<String> {
+    let f = File::open(path).ok()?;
+    let mut reader = BufReader::with_capacity(16 * 1024, f);
+    let mut buf = Vec::with_capacity(2048);
+    for _ in 0..32 {
+        buf.clear();
+        let Ok(n) = reader.read_until(b'\n', &mut buf) else {
+            break;
+        };
+        if n == 0 || !buf.ends_with(b"\n") {
+            break;
+        }
+        let trimmed = trim_ascii(&buf);
+        let Some((_, kind, _, content_pos)) = parse_search_line(trimmed) else {
+            continue;
+        };
+        if kind != StepKind::UserInput {
+            continue;
+        }
+        let Some(pos) = content_pos else {
+            continue;
+        };
+        let mut c_idx = pos;
+        let Some(raw) = parse_string(trimmed, &mut c_idx) else {
+            continue;
+        };
+        if is_compact_request_text(&raw) {
+            continue;
+        }
+        let clean = extract_clean_user_text(&raw);
+        let trimmed_clean = clean.trim();
+        if trimmed_clean.is_empty() {
+            continue;
+        }
+        let one_line: String = trimmed_clean
+            .chars()
+            .map(|c| if c.is_whitespace() { ' ' } else { c })
+            .collect();
+        return Some(truncate_chars(one_line.trim(), 60));
+    }
+    None
+}
+
+fn search_all_notes(
+    notes_dir: &Path,
+    app_data: &Path,
+    skip_conv: &str,
+    query: &str,
+    titles: &HashMap<String, String>,
+    cancel_check: Option<(&AtomicUsize, usize)>,
+) -> (Vec<SearchMatchResult>, usize) {
+    let terms = parse_search_query_terms(query);
+    if terms.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let Ok(entries) = fs::read_dir(notes_dir) else {
+        return (Vec::new(), 0);
+    };
+
+    let mut candidates: Vec<(u128, String, PathBuf)> = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !skip_conv.is_empty() && stem == skip_conv {
+            continue;
+        }
+        if !is_valid_conv_id(stem) && !is_draft_conv(stem) {
+            continue;
+        }
+        let Ok(meta) = fs::metadata(&path) else {
+            continue;
+        };
+        if !meta.is_file() || meta.len() == 0 {
+            continue;
+        }
+        let mtime_ms = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        candidates.push((mtime_ms, stem.to_string(), path));
+    }
+
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.0));
+    if candidates.len() > MAX_ALL_SEARCH_CHATS {
+        candidates.truncate(MAX_ALL_SEARCH_CHATS);
+    }
+
+    let mut note_matches: Vec<SearchMatchResult> = Vec::new();
+    for (_, conv_id, path) in candidates {
+        if let Some((gen_ref, expected)) = cancel_check {
+            if gen_ref.load(Ordering::Acquire) != expected {
+                return (Vec::new(), 0);
+            }
+        }
+        let Ok(bytes) = fs::read(&path) else {
+            continue;
+        };
+        let Some(data) = parse_notes_data(&bytes) else {
+            continue;
+        };
+        let matched_cards: Vec<(u64, &str, SearchMatchWindow)> = data
+            .cards
+            .iter()
+            .filter_map(|c| {
+                let txt = c.text.trim();
+                if txt.is_empty() {
+                    return None;
+                }
+                match_query_best_window(txt, &terms).map(|w| (c.id, txt, w))
+            })
+            .collect();
+        if matched_cards.is_empty() {
+            continue;
+        }
+
+        let title = if is_draft_conv(&conv_id) {
+            "New Chat Draft".to_string()
+        } else {
+            titles
+                .get(&conv_id)
+                .cloned()
+                .or_else(|| read_transcript_fallback_title(&transcript_path(app_data, &conv_id)))
+                .unwrap_or_else(|| truncate_chars(&conv_id, 12))
+        };
+        let is_chat_archived =
+            !titles.is_empty() && !is_draft_conv(&conv_id) && !titles.contains_key(&conv_id);
+
+        for (card_id, txt, win) in matched_cards {
+            note_matches.push(SearchMatchResult {
+                conv_id: conv_id.clone(),
+                chat_title: title.clone(),
+                is_current: false,
+                chat_archived: is_chat_archived,
+                step_index: card_id,
+                role: "note",
+                created_at: String::new(),
+                archived: false,
+                rank: win.rank,
+                snippet: build_search_snippet(txt, win.snippet_start, win.snippet_end),
+                text: truncate_around_match(txt, win.text_start, win.text_end, MAX_SEARCH_TEXT_CHARS),
+            });
+        }
+    }
+
+    let total = note_matches.len();
+    note_matches.sort_by(|a, b| {
+        a.rank
+            .cmp(&b.rank)
+            .then_with(|| b.step_index.cmp(&a.step_index))
+    });
+    if note_matches.len() > MAX_SEARCH_RESULTS {
+        note_matches.truncate(MAX_SEARCH_RESULTS);
+    }
+    (note_matches, total)
 }
 
 fn parse_search_line(b: &[u8]) -> Option<(u64, StepKind, String, Option<usize>)> {
@@ -2836,6 +3185,26 @@ fn apply_step_to_scan(pending: &mut ChatScanState, m: &StepMetrics) {
         pending.latest_step_index = m.step_index;
     }
 
+    if let Some(ref tid) = m.bg_task_started {
+        if !pending.active_bg_tasks.contains(tid) {
+            pending.active_bg_tasks.push(tid.clone());
+        }
+    }
+    if let Some(ref tid) = m.bg_task_ended {
+        pending.active_bg_tasks.retain(|t| t != tid);
+    }
+    for sid in &m.subagent_started {
+        if !pending.active_subagents.contains(sid) {
+            pending.active_subagents.push(sid.clone());
+        }
+    }
+    if let Some(ref sid) = m.subagent_ended {
+        pending.active_subagents.retain(|s| s != sid);
+    }
+    if m.clears_all_subagents {
+        pending.active_subagents.clear();
+    }
+
     if m.is_compact_cmd {
         pending.compact_in_flight = !failed;
     } else if is_user {
@@ -2860,6 +3229,13 @@ fn apply_step_to_scan(pending: &mut ChatScanState, m: &StepMetrics) {
         }
         if m.kind != StepKind::Checkpoint && !pending.compact_in_flight {
             pending.last_non_compact_step = Some(m.step_index);
+            if matches!(
+                m.kind,
+                StepKind::PlannerResponse | StepKind::Generic | StepKind::ErrorMessage
+            ) {
+                pending.undo_step_index = None;
+                pending.just_compressed = false;
+            }
         }
     }
 
@@ -2970,7 +3346,18 @@ fn build_context_json(state: &AppState, conv: &str, req_etag: &str) -> String {
         .map(|d| d.as_millis())
         .unwrap_or(0);
 
-    let etag = format!("{conv}:{size}:{mtime_ms}:s{srev}");
+    let ls_live = resolve_ls_live_status(state, conv);
+    let ls_tag = if ls_live.known {
+        format!(
+            ":l{}{}",
+            if ls_live.is_running { 1 } else { 0 },
+            if ls_live.has_bg_task { 1 } else { 0 }
+        )
+    } else {
+        String::new()
+    };
+
+    let etag = format!("{conv}:{size}:{mtime_ms}:s{srev}{ls_tag}");
     if !req_etag.is_empty() && req_etag == etag {
         return format!(r#"{{"unchanged":true,"etag":"{}"}}"#, json_escape(&etag));
     }
@@ -2991,7 +3378,8 @@ fn build_context_json(state: &AppState, conv: &str, req_etag: &str) -> String {
         );
     }
 
-    let scan = update_chat_scan(state, conv, &path, size, cutoff);
+    let mut scan = update_chat_scan(state, conv, &path, size, cutoff);
+    apply_ls_live_to_summary(&mut scan, ls_live);
     let json = format_scan_json(&etag, &settings_json, &scan);
 
     if let Ok(mut guard) = state.cache.lock() {
@@ -3020,7 +3408,7 @@ fn format_scan_json(etag: &str, settings_json: &str, scan: &ChatScanSummary) -> 
     };
 
     format!(
-        r#"{{"status":"ok","etag":"{}","context_tokens":{},"step_index":{},"message_count":{},"user_messages":{},"model_messages":{},"checkpoint_count":{},"last_checkpoint_step":{},"undo_step_index":{},"compact_in_flight":{},"first_message_at":"{}","last_message_at":"{}","has_delta":{},"delta_tokens":{},"just_compressed":{},"is_busy":{},"turn_finished":{},"settings":{}}}"#,
+        r#"{{"status":"ok","etag":"{}","context_tokens":{},"step_index":{},"message_count":{},"user_messages":{},"model_messages":{},"checkpoint_count":{},"last_checkpoint_step":{},"undo_step_index":{},"compact_in_flight":{},"first_message_at":"{}","last_message_at":"{}","has_delta":{},"delta_tokens":{},"just_compressed":{},"is_busy":{},"has_bg_work":{},"turn_finished":{},"settings":{}}}"#,
         json_escape(etag),
         scan.context_tokens,
         scan.latest_step_index,
@@ -3037,13 +3425,99 @@ fn format_scan_json(etag: &str, settings_json: &str, scan: &ChatScanSummary) -> 
         scan.delta_tokens,
         scan.just_compressed,
         scan.is_busy,
+        scan.has_bg_work,
         scan.turn_finished,
         settings_json,
     )
 }
 
+fn is_valid_bg_task_id(id: &str) -> bool {
+    let Some((conv_part, task_num)) = id.split_once("/task-") else {
+        return false;
+    };
+    is_valid_conv_id(conv_part)
+        && !task_num.is_empty()
+        && task_num.bytes().all(|b| b.is_ascii_digit())
+}
+
+fn inspect_step_content_signals(txt: &str, m: &mut StepMetrics) {
+    if m.kind == StepKind::Generic {
+        const BG_START_MARKER: &str = "Tool is running as a background task with task id: ";
+        if let Some(pos) = txt.find(BG_START_MARKER) {
+            let rest = &txt[pos + BG_START_MARKER.len()..];
+            let id = rest.lines().next().unwrap_or("").trim();
+            if is_valid_bg_task_id(id) {
+                m.bg_task_started = Some(id.to_string());
+            }
+        }
+
+        if txt.contains("Created the following subagent") {
+            let mut search_from = 0usize;
+            const CONV_KEY: &str = "\"conversationId\":";
+            while let Some(rel) = txt[search_from..].find(CONV_KEY) {
+                let after_key = &txt[search_from + rel + CONV_KEY.len()..];
+                let trimmed = after_key.trim_start();
+                if let Some(after_quote) = trimmed.strip_prefix('"') {
+                    if let Some((id, _)) = after_quote.split_once('"') {
+                        let id_trim = id.trim();
+                        if is_valid_conv_id(id_trim)
+                            && !m.subagent_started.iter().any(|s| s == id_trim)
+                        {
+                            m.subagent_started.push(id_trim.to_string());
+                        }
+                    }
+                }
+                search_from += rel + CONV_KEY.len();
+            }
+        }
+        return;
+    }
+
+    if m.kind != StepKind::SystemMessage {
+        return;
+    }
+
+    for marker in ["Task id \"", "Task \""] {
+        if let Some(pos) = txt.find(marker) {
+            let rest = &txt[pos + marker.len()..];
+            if let Some((id, after_id)) = rest.split_once('"') {
+                let id_trim = id.trim();
+                let tail = after_id.trim_start();
+                if is_valid_bg_task_id(id_trim)
+                    && (tail.starts_with("finished")
+                        || tail.starts_with("was canceled")
+                        || tail.starts_with("was cancelled")
+                        || tail.starts_with("cancelled.")
+                        || tail.starts_with("canceled."))
+                {
+                    m.bg_task_ended = Some(id_trim.to_string());
+                    break;
+                }
+            }
+        }
+    }
+
+    if let Some(pos) = txt.find("sender=") {
+        let rest = &txt[pos + "sender=".len()..];
+        let sender = rest.split_whitespace().next().unwrap_or("").trim();
+        if is_valid_conv_id(sender) {
+            m.subagent_ended = Some(sender.to_string());
+        }
+    }
+}
+
+fn inspect_tool_calls_signals(raw_tc: &[u8], m: &mut StepMetrics) {
+    if find_subslice(raw_tc, b"manage_subagents").is_none() {
+        return;
+    }
+    if find_subslice(raw_tc, b"kill").is_some() {
+        m.clears_all_subagents = true;
+    }
+}
+
 fn parse_line(b: &[u8]) -> Option<StepMetrics> {
     let mut m = StepMetrics::default();
+    let mut raw_content: Option<Vec<u8>> = None;
 
     parse_json_object_entries(b, |key, val_slice| {
         let mut idx = 0;
@@ -3092,14 +3566,16 @@ fn parse_line(b: &[u8]) -> Option<StepMetrics> {
                     if val_slice.get(look) != Some(&b'"') {
                         m.has_content = true;
                     }
-                    if find_subslice(val_slice, b"/compact").is_some()
+                    let need_compact = find_subslice(val_slice, b"/compact").is_some()
                         || find_subslice(val_slice, b"\\u002fcompact").is_some()
-                        || find_subslice(val_slice, b"\\u002Fcompact").is_some()
-                    {
-                        let mut k = 0;
-                        if let Some(txt) = parse_string(val_slice, &mut k) {
-                            m.is_compact_cmd = is_compact_request_text(&txt);
-                        }
+                        || find_subslice(val_slice, b"\\u002Fcompact").is_some();
+                    let need_bg = find_subslice(val_slice, b"background task with task id:").is_some()
+                        || find_subslice(val_slice, b"Task id ").is_some()
+                        || find_subslice(val_slice, b"Task \\\"").is_some()
+                        || find_subslice(val_slice, b"Created the following subagent").is_some()
+                        || find_subslice(val_slice, b"sender=").is_some();
+                    if need_compact || need_bg {
+                        raw_content = Some(val_slice.to_vec());
                     }
                 } else if !val_slice.starts_with(b"null") {
                     m.has_content = true;
@@ -3110,6 +3586,7 @@ fn parse_line(b: &[u8]) -> Option<StepMetrics> {
                 skip_ws(val_slice, &mut look);
                 if val_slice.get(look) != Some(&b']') {
                     m.has_tool_calls = true;
+                    inspect_tool_calls_signals(val_slice, &mut m);
                 }
             }
             "error"
@@ -3120,6 +3597,18 @@ fn parse_line(b: &[u8]) -> Option<StepMetrics> {
             _ => {}
         }
     })?;
+
+    if let Some(content_bytes) = raw_content {
+        let mut k = 0;
+        if let Some(txt) = parse_string(&content_bytes, &mut k) {
+            if m.kind == StepKind::UserInput {
+                m.is_compact_cmd = is_compact_request_text(&txt);
+            }
+            if matches!(m.kind, StepKind::Generic | StepKind::SystemMessage) {
+                inspect_step_content_signals(&txt, &mut m);
+            }
+        }
+    }
 
     Some(m)
 }
@@ -3802,6 +4291,7 @@ mod tests {
             cache: Arc::new(Mutex::new(HashMap::new())),
             scans: Arc::new(Mutex::new(HashMap::new())),
             chat_titles: Arc::new(Mutex::new((0, HashMap::new()))),
+            ls_live: Arc::new(Mutex::new(LsLiveCache::default())),
             search_gen: Arc::new(AtomicUsize::new(0)),
             done_sound_mp3: Arc::new(OnceLock::new()),
             active_conns: Arc::new(AtomicUsize::new(0)),
@@ -3874,6 +4364,7 @@ mod tests {
             cache: Arc::new(Mutex::new(HashMap::new())),
             scans: Arc::new(Mutex::new(HashMap::new())),
             chat_titles: Arc::new(Mutex::new((0, HashMap::new()))),
+            ls_live: Arc::new(Mutex::new(LsLiveCache::default())),
             search_gen: Arc::new(AtomicUsize::new(0)),
             done_sound_mp3: Arc::new(OnceLock::new()),
             active_conns: Arc::new(AtomicUsize::new(0)),
@@ -3996,18 +4487,127 @@ mod tests {
 
         let mut titles = HashMap::new();
         titles.insert(conv_a.to_string(), "Linux Release Chat".to_string());
+        let conv_c = "cccccccc-cccc-cccc-cccc-cccccccccccc";
+        let path_c = transcript_path(&dir, conv_c);
+        fs::create_dir_all(path_c.parent().unwrap()).unwrap();
+        fs::write(
+            &path_c,
+            concat!(
+                r#"{"step_index":0,"type":"USER_INPUT","status":"DONE","created_at":"2026-11-19T08:00:00Z","content":"<USER_REQUEST>\nArchived release notes\n</USER_REQUEST>"}"#, "\n"
+            ),
+        )
+        .unwrap();
         let cutoffs = HashMap::new();
 
         let (res, total) = search_all_transcripts(&dir, conv_b, "release", &cutoffs, &titles, None);
-        assert_eq!(total, 2);
-        assert_eq!(res.len(), 2);
+        assert_eq!(total, 3);
+        assert_eq!(res.len(), 3);
         assert_eq!(res[0].conv_id, conv_b);
         assert!(res[0].is_current);
+        assert!(!res[0].chat_archived);
         assert_eq!(res[0].chat_title, "Verify release archive for macOS");
         assert_eq!(res[1].conv_id, conv_a);
         assert!(!res[1].is_current);
+        assert!(!res[1].chat_archived);
         assert_eq!(res[1].chat_title, "Linux Release Chat");
+        assert_eq!(res[2].conv_id, conv_c);
+        assert!(!res[2].is_current);
+        assert!(res[2].chat_archived);
+        assert_eq!(res[2].chat_title, "Archived release notes");
+
+        let empty_titles = HashMap::new();
+        let (res_no_ls, _) = search_all_transcripts(&dir, conv_b, "release", &cutoffs, &empty_titles, None);
+        assert!(res_no_ls.iter().all(|r| !r.chat_archived));
+
+        let n_dir = dir.join("notes");
+        fs::create_dir_all(&n_dir).unwrap();
+        fs::write(
+            n_dir.join(format!("{conv_c}.json")),
+            r#"{"draft":"","next_id":2,"cards":[{"id":1,"text":"Remember release checklist for Linux","pinned":true}]}"#,
+        )
+        .unwrap();
+        let (note_res, note_total) = search_all_notes(&n_dir, &dir, conv_b, "release", &titles, None);
+        assert_eq!(note_total, 1);
+        assert_eq!(note_res[0].role, "note");
+        assert_eq!(note_res[0].conv_id, conv_c);
+        assert!(note_res[0].chat_archived);
+        assert_eq!(note_res[0].chat_title, "Archived release notes");
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn background_tasks_keep_session_busy_and_subsequent_steps_clear_undo() {
+        let mut st = ChatScanState::default();
+
+        push_step_to_scan(&mut st, parse_line(
+            br#"{"step_index":1,"type":"USER_INPUT","status":"DONE","content":"Run build and tests"}"#
+        ).unwrap());
+        push_step_to_scan(&mut st, parse_line(
+            br#"{"step_index":2,"type":"PLANNER_RESPONSE","status":"DONE","input_tokens":5000,"cache_read_tokens":250000,"tool_calls":[{"name":"run_command"}]}"#
+        ).unwrap());
+        push_step_to_scan(&mut st, parse_line(
+            br#"{"step_index":3,"type":"GENERIC","status":"DONE","content":"ok"}"#
+        ).unwrap());
+        // Native mid-turn checkpoint at step 4
+        push_step_to_scan(&mut st, parse_line(
+            br#"{"step_index":4,"type":"CHECKPOINT","status":"DONE","output_tokens":7500}"#
+        ).unwrap());
+        let sum_at_cp = st.to_summary();
+        assert_eq!(sum_at_cp.undo_step_index, Some(3));
+        assert!(sum_at_cp.just_compressed);
+
+        // Prose in PLANNER_RESPONSE mentioning task markers must NEVER trigger false bg tracking
+        push_step_to_scan(&mut st, parse_line(
+            br#"{"step_index":5,"type":"PLANNER_RESPONSE","status":"DONE","input_tokens":20000,"cache_read_tokens":0,"content":"Note: Tool is running as a background task with task id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/task-999"}"#
+        ).unwrap());
+        let sum_after_resume = st.to_summary();
+        assert_eq!(sum_after_resume.undo_step_index, None);
+        assert!(!sum_after_resume.just_compressed);
+        assert!(!sum_after_resume.is_busy);
+        assert!(!sum_after_resume.has_bg_work);
+
+        // Background task starts at step 6 (real GENERIC step)
+        push_step_to_scan(&mut st, parse_line(
+            br#"{"step_index":6,"type":"GENERIC","status":"RUNNING","content":"Created At: 2026-11-23T19:55:48+03:00\nTool is running as a background task with task id: aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/task-6\nTask Description: cargo test\n"}"#
+        ).unwrap());
+        // Agent outputs "Waiting for tests" message with no tool calls (step 7)
+        push_step_to_scan(&mut st, parse_line(
+            br#"{"step_index":7,"type":"PLANNER_RESPONSE","status":"DONE","input_tokens":2500,"cache_read_tokens":20000,"content":"Waiting for cargo test to finish."}"#
+        ).unwrap());
+        let sum_waiting_bg = st.to_summary();
+        assert!(sum_waiting_bg.is_busy);
+        assert!(sum_waiting_bg.has_bg_work);
+        assert!(!sum_waiting_bg.turn_finished);
+        assert_eq!(sum_waiting_bg.undo_step_index, None);
+
+        // Background task finishes via SYSTEM_MESSAGE (step 8)
+        push_step_to_scan(&mut st, parse_line(
+            br#"{"step_index":8,"type":"SYSTEM_MESSAGE","status":"DONE","content":"<SYSTEM_MESSAGE>\n[Message] timestamp=2026-11-23T16:57:40Z sender=aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/task-6 priority=MESSAGE_PRIORITY_HIGH content=Task id \"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa/task-6\" finished with result:\nCommand exited with code 0.\n</SYSTEM_MESSAGE>"}"#
+        ).unwrap());
+        // Agent sends final reply after task finishes (step 9)
+        push_step_to_scan(&mut st, parse_line(
+            br#"{"step_index":9,"type":"PLANNER_RESPONSE","status":"DONE","input_tokens":3000,"cache_read_tokens":22500,"content":"All tests passed."}"#
+        ).unwrap());
+        let mut sum_final = st.to_summary();
+        assert!(!sum_final.is_busy);
+        assert!(!sum_final.has_bg_work);
+        assert!(sum_final.turn_finished);
+
+        // Live LS idle status clears stale busy/bg state (e.g. quota error or server restart)
+        sum_final.is_busy = true;
+        sum_final.has_bg_work = true;
+        sum_final.compact_in_flight = true;
+        apply_ls_live_to_summary(&mut sum_final, LsLiveConvStatus { known: true, is_running: false, has_bg_task: false });
+        assert!(!sum_final.is_busy);
+        assert!(!sum_final.has_bg_work);
+        assert!(!sum_final.compact_in_flight);
+
+        // Live LS background task forces busy state & hides Undo
+        sum_final.undo_step_index = Some(3);
+        apply_ls_live_to_summary(&mut sum_final, LsLiveConvStatus { known: true, is_running: false, has_bg_task: true });
+        assert!(sum_final.is_busy);
+        assert!(sum_final.has_bg_work);
+        assert_eq!(sum_final.undo_step_index, None);
     }
 }

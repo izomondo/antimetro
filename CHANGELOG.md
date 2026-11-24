@@ -4,6 +4,33 @@ Track new features, improvements, and bug fixes in **Antimetro** for Google Anti
 
 ---
 
+## v1.2.0
+
+**November 24, 2026**
+
+### Draggable Auto-Compact Pin, Card-First Notes, Archived & Notes Search, and Seamless Scroll
+
+This release upgrades **Antimetro** with a draggable circular Auto-compact threshold handle right on the token meter, cross-chat search that now includes archived chats (up to `500`) and saved notes from every conversation, a streamlined card-first **Notes** & **Search** header with smooth drawer animations, unified nested wheel scrolling, and live Language Server status accuracy. It includes **8 improvements** and **3 fixes**.
+
+### Improvements (8)
+
+- Replaced the static Auto-compact notch on the token meter with a draggable circular handle (`10K` snap increments from `10K` to `500K`), complete with live tooltip readout while dragging, keyboard arrow adjustments, and `Escape` to cancel.
+- Expanded global **Search** (`All` by default) from `200` to `500` recent local chats, including archived conversations labeled with a `· archived` badge and a faster `5s` conversation title refresh cache.
+- **Search** now matches your per-chat **Notes** alongside conversation messages (tagged with a `Note` badge), covering both live unsaved notes in the current chat and saved notes across all other chats.
+- Redesigned **Notes** into a cleaner card-first flow without a separate top scratchpad: when a chat has `0` or `1` note, that solo card stretches cleanly to the bottom of the panel and stays expanded until you add a second card, with a per-card save indicator right next to `Pin` and a blue accent border highlighting whichever note or search card is currently active.
+- Streamlined the `Notes` / `Search` header with crisp larger action icons (`+` square-plus on the left to add a card, scan-search toggle on the right to filter strictly to `This chat`), a smooth bottom-pinned slide drawer for the search box, an inline amber match counter inside the search input next to a larger clear `×` button, and balanced card icon spacing.
+- Unified wheel scrolling across expanded cards and the outer card list onto a single smooth glide curve, eliminating speed overlap, discrete jumps, and Chromium's boundary-latching pause when scrolling past the end of a long card.
+- Expanding a long **Search** result now locks the best-matching phrase (`mark.is-focus`) to the center of the card from the very first frame of expansion instead of jumping after a delay.
+- Animated the left overflow dot-rail scrollbar so it slides smoothly in and out without abruptly shifting card widths, tracking card expand/collapse and list changes continuously.
+
+### Fixes (3)
+
+- Integrated live `GetAllCascadeTrajectories` status alongside transcript background-task tracking so completed, canceled, or idle sessions no longer leave the rainbow progress bar spinning or keep **Compact now** / **Undo** locked, while hiding **Undo** during active background work and resetting it as soon as a new step runs after compaction.
+- Ensured **Auto-compact** waits cleanly for the active agent turn and background tasks to finish before triggering compaction, preventing mid-turn interruptions while files are being edited.
+- Reserved fixed layout space for the per-card save indicator so card icons never jitter during autosave, and excluded `__draft__` notes from server-side `All` scans so unsaved notes in brand-new chats are never duplicated in search results.
+
+---
+
 ## v1.1.0
 
 **November 23, 2026**
