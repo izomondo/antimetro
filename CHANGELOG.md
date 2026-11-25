@@ -4,6 +4,31 @@ Track new features, improvements, and bug fixes in **Antimetro** for Google Anti
 
 ---
 
+## v1.3.0
+
+**November 25, 2026**
+
+### Model Quota Rings, Automatic Orphan Cleanup, Overlay Scroll Rail, and Notes Polish
+
+This release brings live **Gemini** and **Other** (Claude/GPT) weekly & 5-hour quota rings right under the token meter, automatic cleanup of orphaned plugin data when chats are deleted, a zero-shift overlay scroll rail, a cleaner compact date bar, and a critical fix for note card expansion jumping. It includes **7 improvements** and **2 fixes**.
+
+### Improvements (7)
+
+- Added a live **Model Quota** panel directly below the token meter showing **Gemini** and **Other** weekly (`W`) and 5-hour (`5h`) remaining quota with symmetric color-coded rings (`66–100%` green, `31–65%` amber, `1–30%` red), left-aligned percentages, and concise `Resets in ...` tooltips. Refreshes live on real model steps during active work (throttled to at most once every `15s`), `2s` after a turn finishes, and passively from cache every `60s` while idle.
+- Added safe automatic cleanup of orphaned per-chat data (`notes/<id>.json`, `.json.bak`, and stored chat settings/cutoffs) when conversations are permanently deleted in Antigravity, while always preserving active, archived, and draft chats.
+- Replaced the left dot-rail scrollbar with a sleek `3px` auto-hiding overlay scroll rail in the right outer margin (and matched inner card scrollbars to `3px` at the same soft opacity), eliminating horizontal layout shifts and text reflows while scrolling.
+- Streamlined the chat metadata card into a calmer single-row date layout (`First 22 Nov, 11:36` / `Last 24 Nov, 16:18`) to give more vertical room to quotas and notes.
+- Refined **Notes** card ergonomics: swapped `Pin` and `Copy` icon order (`Pin` first) and made `Copy` appear only when a card is focused to prevent accidental clicks and reduce visual clutter.
+- A single non-empty note card now cleanly collapses to 5 lines when focus leaves, while an empty chat's initial note card stays stretched to the bottom of the panel until you start writing and click away.
+- Updated compatibility badge and metadata for **Antigravity App 2.0 (v2.35.1)**.
+
+### Fixes (2)
+
+- Fixed a bug where clicking any collapsed note card caused the card list and textarea to jump abruptly to the middle, hiding the card header above the viewport (caused by `.cards-viewport` missing `position: relative` for `offsetTop` calculations).
+- Fixed subtle inertia cutoff and stutter when scrolling inside solo or expanded note cards by adding subpixel scroll accumulators and strict edge handoff checks in the unified wheel engine.
+
+---
+
 ## v1.2.0
 
 **November 24, 2026**

@@ -297,6 +297,14 @@ struct LsLiveCache {
     bg_convs: Vec<String>,
 }
 
+#[derive(Default, Clone)]
+struct QuotaCache {
+    fetched_at: Option<Instant>,
+    last_force_at: Option<Instant>,
+    ok: bool,
+    json: String,
+}
+
 #[derive(Default, Clone, Copy)]
 struct LsLiveConvStatus {
     known: bool,
@@ -319,6 +327,8 @@ struct AppState {
     scans: Arc<Mutex<HashMap<String, ChatScanState>>>,
     chat_titles: Arc<Mutex<(u64, HashMap<String, String>)>>,
     ls_live: Arc<Mutex<LsLiveCache>>,
+    quota_cache: Arc<Mutex<QuotaCache>>,
+    last_prune_at: Arc<Mutex<Option<Instant>>>,
     search_gen: Arc<AtomicUsize>,
     done_sound_mp3: Arc<OnceLock<Vec<u8>>>,
     active_conns: Arc<AtomicUsize>,
@@ -408,6 +418,8 @@ fn main() {
         scans: Arc::new(Mutex::new(HashMap::new())),
         chat_titles: Arc::new(Mutex::new((0, HashMap::new()))),
         ls_live: Arc::new(Mutex::new(LsLiveCache::default())),
+        quota_cache: Arc::new(Mutex::new(QuotaCache::default())),
+        last_prune_at: Arc::new(Mutex::new(None)),
         search_gen: Arc::new(AtomicUsize::new(0)),
         done_sound_mp3: Arc::new(OnceLock::new()),
         active_conns: Arc::new(AtomicUsize::new(0)),
@@ -951,6 +963,19 @@ fn handle_client(mut stream: TcpStream, state: &AppState) {
                         );
                     }
                 }
+            }
+            ("GET", "/api/quota") => {
+                let force = query
+                    .get("force")
+                    .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true"));
+                let body = handle_get_quota(state, force);
+                send_response(
+                    &mut stream,
+                    200,
+                    "application/json; charset=utf-8",
+                    body.as_bytes(),
+                    keep_alive,
+                );
             }
             ("GET", "/api/context") => {
                 let conv = query
@@ -1993,6 +2018,10 @@ fn resolve_ls_live_status(state: &AppState, conv: &str) -> LsLiveConvStatus {
     let is_running = running_convs.get(conv).copied().unwrap_or(false);
     let has_bg_task = bg_convs.iter().any(|c| c == conv);
 
+    if !running_convs.is_empty() {
+        maybe_prune_deleted_chats(state, conv, &running_convs);
+    }
+
     if let Ok(mut guard) = state.ls_live.lock() {
         guard.fetched_at = Some(Instant::now());
         guard.running_convs = running_convs;
@@ -2004,6 +2033,482 @@ fn resolve_ls_live_status(state: &AppState, conv: &str) -> LsLiveConvStatus {
         is_running,
         has_bg_task,
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct QuotaBucketInfo {
+    label: String,
+    pct: u8,
+    reset_time: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct QuotaGroupInfo {
+    label: String,
+    weekly: Option<QuotaBucketInfo>,
+    five_hour: Option<QuotaBucketInfo>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq)]
+struct QuotaSummaryParsed {
+    gemini: Option<QuotaGroupInfo>,
+    other: Option<QuotaGroupInfo>,
+}
+
+impl QuotaBucketInfo {
+    fn to_json(&self) -> String {
+        format!(
+            r#"{{"label":"{}","pct":{},"reset_time":"{}"}}"#,
+            json_escape(&self.label),
+            self.pct,
+            json_escape(&self.reset_time)
+        )
+    }
+}
+
+impl QuotaGroupInfo {
+    fn has_any(&self) -> bool {
+        self.weekly.is_some() || self.five_hour.is_some()
+    }
+
+    fn to_json(&self) -> String {
+        let w = match &self.weekly {
+            Some(b) => b.to_json(),
+            None => "null".to_string(),
+        };
+        let h = match &self.five_hour {
+            Some(b) => b.to_json(),
+            None => "null".to_string(),
+        };
+        format!(
+            r#"{{"label":"{}","weekly":{},"five_hour":{}}}"#,
+            json_escape(&self.label),
+            w,
+            h
+        )
+    }
+}
+
+impl QuotaSummaryParsed {
+    fn has_any(&self) -> bool {
+        self.gemini.as_ref().is_some_and(QuotaGroupInfo::has_any)
+            || self.other.as_ref().is_some_and(QuotaGroupInfo::has_any)
+    }
+
+    fn to_json(&self) -> String {
+        if !self.has_any() {
+            return r#"{"available":false}"#.to_string();
+        }
+        let g = match &self.gemini {
+            Some(gr) if gr.has_any() => gr.to_json(),
+            _ => "null".to_string(),
+        };
+        let o = match &self.other {
+            Some(gr) if gr.has_any() => gr.to_json(),
+            _ => "null".to_string(),
+        };
+        format!(r#"{{"available":true,"gemini":{g},"other":{o}}}"#)
+    }
+}
+
+fn parse_f64_slice(b: &[u8]) -> Option<f64> {
+    let s = std::str::from_utf8(trim_ascii(b)).ok()?;
+    let val = s.parse::<f64>().ok()?;
+    if val.is_finite() { Some(val) } else { None }
+}
+
+fn parse_quota_bucket(obj: &[u8]) -> Option<(QuotaBucketInfo, String)> {
+    let mut label = String::new();
+    let mut window = String::new();
+    let mut reset_time = String::new();
+    let mut frac: Option<f64> = None;
+    let mut disabled = false;
+
+    parse_json_object_entries(obj, |k, v| match k.as_str() {
+        "displayName" | "display_name" if v.first() == Some(&b'"') => {
+            let mut idx = 0;
+            if let Some(s) = parse_string(v, &mut idx) {
+                label = s;
+            }
+        }
+        "window" if v.first() == Some(&b'"') => {
+            let mut idx = 0;
+            if let Some(s) = parse_string(v, &mut idx) {
+                window = s;
+            }
+        }
+        "resetTime" | "reset_time" if v.first() == Some(&b'"') => {
+            let mut idx = 0;
+            if let Some(s) = parse_string(v, &mut idx) {
+                reset_time = s;
+            }
+        }
+        "remainingFraction" | "remaining_fraction" => {
+            if let Some(f) = parse_f64_slice(v) {
+                frac = Some(f);
+            }
+        }
+        "disabled" => {
+            let mut idx = 0;
+            skip_ws(v, &mut idx);
+            if let Some(d) = parse_bool(v, &mut idx) {
+                disabled = d;
+            }
+        }
+        _ => {}
+    })?;
+
+    if disabled {
+        return None;
+    }
+    let f = frac.unwrap_or(0.0).clamp(0.0, 1.0);
+    let pct = (f * 100.0).round().clamp(0.0, 100.0) as u8;
+    Some((
+        QuotaBucketInfo {
+            label,
+            pct,
+            reset_time,
+        },
+        window,
+    ))
+}
+
+fn parse_quota_group(obj: &[u8]) -> Option<QuotaGroupInfo> {
+    let mut label = String::new();
+    let mut buckets: Vec<(QuotaBucketInfo, String)> = Vec::new();
+
+    parse_json_object_entries(obj, |k, v| match k.as_str() {
+        "displayName" | "display_name" if v.first() == Some(&b'"') => {
+            let mut idx = 0;
+            if let Some(s) = parse_string(v, &mut idx) {
+                label = s;
+            }
+        }
+        "buckets" if v.first() == Some(&b'[') => {
+            let mut i = 1usize;
+            loop {
+                skip_ws(v, &mut i);
+                if v.get(i) == Some(&b']') || i >= v.len() {
+                    break;
+                }
+                let start = i;
+                if skip_value(v, &mut i).is_none() {
+                    break;
+                }
+                let elem = &v[start..i];
+                if elem.first() == Some(&b'{') {
+                    if let Some(parsed) = parse_quota_bucket(elem) {
+                        buckets.push(parsed);
+                    }
+                }
+                skip_ws(v, &mut i);
+                if v.get(i) == Some(&b',') {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+        _ => {}
+    })?;
+
+    if buckets.is_empty() {
+        return None;
+    }
+
+    let mut group = QuotaGroupInfo {
+        label,
+        weekly: None,
+        five_hour: None,
+    };
+    let mut unmatched: Vec<QuotaBucketInfo> = Vec::new();
+
+    for (b, win) in buckets {
+        let hint = format!("{} {}", b.label, win).to_ascii_lowercase();
+        if (hint.contains("week") || hint.contains("7d") || hint.contains("168h"))
+            && group.weekly.is_none()
+        {
+            group.weekly = Some(b);
+        } else if (hint.contains("5h") || hint.contains("5 h") || hint.contains("hour"))
+            && group.five_hour.is_none()
+        {
+            group.five_hour = Some(b);
+        } else {
+            unmatched.push(b);
+        }
+    }
+
+    for b in unmatched {
+        if group.weekly.is_none() {
+            group.weekly = Some(b);
+        } else if group.five_hour.is_none() {
+            group.five_hour = Some(b);
+        }
+    }
+
+    if group.has_any() { Some(group) } else { None }
+}
+
+fn parse_quota_summary_json(b: &[u8]) -> QuotaSummaryParsed {
+    let mut inner: Option<Vec<u8>> = None;
+    let _ = parse_json_object_entries(b, |k, v| {
+        if k == "response" && v.first() == Some(&b'{') {
+            inner = Some(v.to_vec());
+        }
+    });
+    let root = inner.as_deref().unwrap_or(b);
+
+    let mut groups: Vec<QuotaGroupInfo> = Vec::new();
+    let _ = parse_json_object_entries(root, |k, v| {
+        if k == "groups" && v.first() == Some(&b'[') {
+            let mut i = 1usize;
+            loop {
+                skip_ws(v, &mut i);
+                if v.get(i) == Some(&b']') || i >= v.len() {
+                    break;
+                }
+                let start = i;
+                if skip_value(v, &mut i).is_none() {
+                    break;
+                }
+                let elem = &v[start..i];
+                if elem.first() == Some(&b'{') {
+                    if let Some(g) = parse_quota_group(elem) {
+                        groups.push(g);
+                    }
+                }
+                skip_ws(v, &mut i);
+                if v.get(i) == Some(&b',') {
+                    i += 1;
+                } else {
+                    break;
+                }
+            }
+        }
+    });
+
+    let mut out = QuotaSummaryParsed::default();
+    for g in groups {
+        let lower = g.label.to_ascii_lowercase();
+        if lower.contains("gemini") {
+            if out.gemini.is_none() {
+                out.gemini = Some(g);
+            }
+        } else if out.other.is_none() {
+            out.other = Some(g);
+        }
+    }
+    out
+}
+
+fn handle_get_quota(state: &AppState, force: bool) -> String {
+    if let Ok(guard) = state.quota_cache.lock() {
+        let fresh = if force {
+            guard
+                .last_force_at
+                .is_some_and(|ts| ts.elapsed() < Duration::from_secs(3))
+        } else if let Some(ts) = guard.fetched_at {
+            let max_age = if guard.ok {
+                Duration::from_secs(8)
+            } else {
+                Duration::from_secs(15)
+            };
+            ts.elapsed() < max_age
+        } else {
+            false
+        };
+        if fresh && !guard.json.is_empty() {
+            return guard.json.clone();
+        }
+    }
+
+    let req_body = if force {
+        r#"{"forceRefresh":true}"#
+    } else {
+        "{}"
+    };
+
+    let (ok, json) = match resolve_ls_creds(state) {
+        Ok((host_port, csrf)) => match post_ls_json_bytes(
+            host_port,
+            csrf,
+            "/exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
+            req_body,
+            Duration::from_secs(5),
+            512 * 1024,
+        ) {
+            Ok((status, body_bytes)) if (200..=299).contains(&status) && !body_bytes.is_empty() => {
+                let parsed = parse_quota_summary_json(&body_bytes);
+                let has_data = parsed.has_any();
+                (has_data, parsed.to_json())
+            }
+            _ => (false, r#"{"available":false}"#.to_string()),
+        },
+        Err(_) => (false, r#"{"available":false}"#.to_string()),
+    };
+
+    if let Ok(mut guard) = state.quota_cache.lock() {
+        let now = Instant::now();
+        guard.fetched_at = Some(now);
+        if force {
+            guard.last_force_at = Some(now);
+        }
+        guard.ok = ok;
+        guard.json = json.clone();
+    }
+    json
+}
+
+fn maybe_prune_deleted_chats(
+    state: &AppState,
+    active_conv: &str,
+    live_convs: &HashMap<String, bool>,
+) {
+    if live_convs.is_empty() {
+        return;
+    }
+    let should_run = match state.last_prune_at.lock() {
+        Ok(mut guard) => match *guard {
+            Some(ts) if ts.elapsed() < Duration::from_secs(600) => false,
+            _ => {
+                *guard = Some(Instant::now());
+                true
+            }
+        },
+        Err(_) => false,
+    };
+    if !should_run {
+        return;
+    }
+    let _ = prune_deleted_chats(state, active_conv, live_convs, Duration::from_secs(60));
+}
+
+fn prune_deleted_chats(
+    state: &AppState,
+    active_conv: &str,
+    live_convs: &HashMap<String, bool>,
+    min_note_age: Duration,
+) -> usize {
+    if live_convs.is_empty() {
+        return 0;
+    }
+    let brain_dir = state.app_data.join("brain");
+    if !brain_dir.is_dir() {
+        return 0;
+    }
+
+    let mut removed = 0usize;
+    let mut removed_ids: Vec<String> = Vec::new();
+
+    if let Ok(_notes_guard) = state.notes_lock.lock() {
+        if let Ok(entries) = fs::read_dir(&state.notes_dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+                    continue;
+                };
+                let conv_id = if let Some(stem) = file_name.strip_suffix(".json") {
+                    stem
+                } else if let Some(stem) = file_name.strip_suffix(".json.bak") {
+                    stem
+                } else {
+                    continue;
+                };
+                if conv_id == DRAFT_CONV_ID
+                    || (!active_conv.is_empty() && conv_id == active_conv)
+                    || !is_valid_conv_id(conv_id)
+                {
+                    continue;
+                }
+                if live_convs.contains_key(conv_id) || brain_dir.join(conv_id).exists() {
+                    continue;
+                }
+                if !min_note_age.is_zero() {
+                    let is_recent = fs::metadata(&path)
+                        .and_then(|m| m.modified())
+                        .ok()
+                        .and_then(|t| t.elapsed().ok())
+                        .is_some_and(|age| age < min_note_age);
+                    if is_recent {
+                        continue;
+                    }
+                }
+                if fs::remove_file(&path).is_ok() {
+                    removed = removed.saturating_add(1);
+                    if !removed_ids.iter().any(|id| id == conv_id) {
+                        removed_ids.push(conv_id.to_string());
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(mut store) = state.settings.lock() {
+        let mut settings_changed = false;
+        let orphan_chats: Vec<String> = store
+            .chats
+            .keys()
+            .filter(|id| {
+                id.as_str() != DRAFT_CONV_ID
+                    && (active_conv.is_empty() || id.as_str() != active_conv)
+                    && is_valid_conv_id(id)
+                    && !live_convs.contains_key(id.as_str())
+                    && !brain_dir.join(id).exists()
+            })
+            .cloned()
+            .collect();
+        for id in orphan_chats {
+            store.chats.remove(&id);
+            store.chat_order.retain(|k| k != &id);
+            settings_changed = true;
+            removed = removed.saturating_add(1);
+            if !removed_ids.contains(&id) {
+                removed_ids.push(id);
+            }
+        }
+
+        let orphan_cutoffs: Vec<String> = store
+            .cutoffs
+            .keys()
+            .filter(|id| {
+                id.as_str() != DRAFT_CONV_ID
+                    && (active_conv.is_empty() || id.as_str() != active_conv)
+                    && is_valid_conv_id(id)
+                    && !live_convs.contains_key(id.as_str())
+                    && !brain_dir.join(id).exists()
+            })
+            .cloned()
+            .collect();
+        for id in orphan_cutoffs {
+            store.cutoffs.remove(&id);
+            store.cutoff_order.retain(|k| k != &id);
+            settings_changed = true;
+            removed = removed.saturating_add(1);
+            if !removed_ids.contains(&id) {
+                removed_ids.push(id);
+            }
+        }
+
+        if settings_changed {
+            store.rev = store.rev.saturating_add(1);
+            let _ = save_settings_store(&store);
+        }
+    }
+
+    if !removed_ids.is_empty() {
+        if let Ok(mut scans) = state.scans.lock() {
+            for id in &removed_ids {
+                scans.remove(id);
+            }
+        }
+        if let Ok(mut cache) = state.cache.lock() {
+            for id in &removed_ids {
+                cache.remove(id);
+            }
+        }
+    }
+
+    removed
 }
 
 fn apply_ls_live_to_summary(scan: &mut ChatScanSummary, ls: LsLiveConvStatus) {
@@ -4292,6 +4797,8 @@ mod tests {
             scans: Arc::new(Mutex::new(HashMap::new())),
             chat_titles: Arc::new(Mutex::new((0, HashMap::new()))),
             ls_live: Arc::new(Mutex::new(LsLiveCache::default())),
+            quota_cache: Arc::new(Mutex::new(QuotaCache::default())),
+            last_prune_at: Arc::new(Mutex::new(None)),
             search_gen: Arc::new(AtomicUsize::new(0)),
             done_sound_mp3: Arc::new(OnceLock::new()),
             active_conns: Arc::new(AtomicUsize::new(0)),
@@ -4365,6 +4872,8 @@ mod tests {
             scans: Arc::new(Mutex::new(HashMap::new())),
             chat_titles: Arc::new(Mutex::new((0, HashMap::new()))),
             ls_live: Arc::new(Mutex::new(LsLiveCache::default())),
+            quota_cache: Arc::new(Mutex::new(QuotaCache::default())),
+            last_prune_at: Arc::new(Mutex::new(None)),
             search_gen: Arc::new(AtomicUsize::new(0)),
             done_sound_mp3: Arc::new(OnceLock::new()),
             active_conns: Arc::new(AtomicUsize::new(0)),
@@ -4609,5 +5118,120 @@ mod tests {
         assert!(sum_final.is_busy);
         assert!(sum_final.has_bg_work);
         assert_eq!(sum_final.undo_step_index, None);
+    }
+
+    #[test]
+    fn parse_quota_summary_extracts_gemini_and_other_buckets() {
+        let raw = br#"{
+            "response": {
+                "groups": [
+                    {
+                        "displayName": "Gemini Models",
+                        "buckets": [
+                            {"displayName": "Weekly limit", "remainingFraction": 0.82, "resetTime": "2026-11-30T12:00:00Z"},
+                            {"displayName": "5h limit", "remainingFraction": 0.934, "resetTime": "2026-11-24T23:40:00Z"}
+                        ]
+                    },
+                    {
+                        "displayName": "Claude and GPT models",
+                        "buckets": [
+                            {"displayName": "Weekly limit", "remainingFraction": 0.70, "resetTime": "2026-11-25T10:00:00Z"},
+                            {"displayName": "5h limit", "remainingFraction": 1, "resetTime": ""}
+                        ]
+                    }
+                ]
+            }
+        }"#;
+        let parsed = parse_quota_summary_json(raw);
+        assert!(parsed.has_any());
+        let g = parsed.gemini.as_ref().unwrap();
+        assert_eq!(g.weekly.as_ref().unwrap().pct, 82);
+        assert_eq!(g.five_hour.as_ref().unwrap().pct, 93);
+        let o = parsed.other.as_ref().unwrap();
+        assert_eq!(o.weekly.as_ref().unwrap().pct, 70);
+        assert_eq!(o.five_hour.as_ref().unwrap().pct, 100);
+        let json = parsed.to_json();
+        assert!(json.contains(r#""available":true"#));
+        assert!(json.contains(r#""pct":82"#));
+        assert!(json.contains(r#""pct":100"#));
+
+        let empty = parse_quota_summary_json(br#"{"response":{}}"#);
+        assert!(!empty.has_any());
+        assert_eq!(empty.to_json(), r#"{"available":false}"#);
+    }
+
+    #[test]
+    fn prune_deleted_chats_removes_orphans_and_keeps_live_and_archived() {
+        let mut dir = env::temp_dir();
+        dir.push(format!("antimetro_test_prune_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+
+        let live_id = "11111111-1111-1111-1111-111111111111";
+        let archived_id = "22222222-2222-2222-2222-222222222222";
+        let deleted_id = "33333333-3333-3333-3333-333333333333";
+
+        fs::create_dir_all(dir.join("brain").join(live_id)).unwrap();
+        fs::create_dir_all(dir.join("brain").join(archived_id)).unwrap();
+        let notes_dir = dir.join("notes");
+        fs::create_dir_all(&notes_dir).unwrap();
+
+        fs::write(notes_dir.join(format!("{live_id}.json")), r#"{"draft":"","cards":[],"next_id":1}"#).unwrap();
+        fs::write(notes_dir.join(format!("{archived_id}.json")), r#"{"draft":"","cards":[],"next_id":1}"#).unwrap();
+        fs::write(notes_dir.join(format!("{deleted_id}.json")), r#"{"draft":"","cards":[],"next_id":1}"#).unwrap();
+        fs::write(notes_dir.join(format!("{DRAFT_CONV_ID}.json")), r#"{"draft":"","cards":[],"next_id":1}"#).unwrap();
+
+        let mut chats = HashMap::new();
+        chats.insert(live_id.to_string(), Settings::default());
+        chats.insert(archived_id.to_string(), Settings::default());
+        chats.insert(deleted_id.to_string(), Settings::default());
+
+        let state = AppState {
+            app_data: dir.clone(),
+            notes_dir: notes_dir.clone(),
+            token: None,
+            default_conv: None,
+            ls_address: None,
+            csrf_token: None,
+            preload_js: String::new(),
+            settings: Arc::new(Mutex::new(SettingsStore {
+                chats,
+                chat_order: vec![live_id.to_string(), archived_id.to_string(), deleted_id.to_string()],
+                draft: Settings::default(),
+                draft_updated_at: 0,
+                has_pending_draft: false,
+                cutoffs: HashMap::new(),
+                cutoff_order: Vec::new(),
+                rev: 1,
+                path: dir.join("settings.json"),
+            })),
+            notes_lock: Arc::new(Mutex::new(())),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            scans: Arc::new(Mutex::new(HashMap::new())),
+            chat_titles: Arc::new(Mutex::new((0, HashMap::new()))),
+            ls_live: Arc::new(Mutex::new(LsLiveCache::default())),
+            quota_cache: Arc::new(Mutex::new(QuotaCache::default())),
+            last_prune_at: Arc::new(Mutex::new(None)),
+            search_gen: Arc::new(AtomicUsize::new(0)),
+            done_sound_mp3: Arc::new(OnceLock::new()),
+            active_conns: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let mut live_map = HashMap::new();
+        live_map.insert(live_id.to_string(), false);
+
+        let pruned = prune_deleted_chats(&state, live_id, &live_map, Duration::ZERO);
+        assert_eq!(pruned, 2); // deleted note file + deleted settings entry
+        assert!(notes_dir.join(format!("{live_id}.json")).exists());
+        assert!(notes_dir.join(format!("{archived_id}.json")).exists());
+        assert!(notes_dir.join(format!("{DRAFT_CONV_ID}.json")).exists());
+        assert!(!notes_dir.join(format!("{deleted_id}.json")).exists());
+
+        let store = state.settings.lock().unwrap();
+        assert!(store.chats.contains_key(live_id));
+        assert!(store.chats.contains_key(archived_id));
+        assert!(!store.chats.contains_key(deleted_id));
+        drop(store);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

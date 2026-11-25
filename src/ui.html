@@ -76,8 +76,8 @@
   }
   /* Sleek Antigravity-style auto-hiding thin scrollbars */
   ::-webkit-scrollbar {
-    width: 5px;
-    height: 5px;
+    width: 3px;
+    height: 3px;
   }
   ::-webkit-scrollbar-button {
     display: none;
@@ -95,11 +95,11 @@
   .block-editor.is-scrolling::-webkit-scrollbar-thumb,
   .search-block:hover .search-body::-webkit-scrollbar-thumb,
   .search-body.is-scrolling::-webkit-scrollbar-thumb {
-    background: color-mix(in srgb, var(--am-fg) 22%, transparent);
+    background: color-mix(in srgb, var(--am-fg) 15%, transparent);
   }
   .block-editor::-webkit-scrollbar-thumb:hover,
   .search-body::-webkit-scrollbar-thumb:hover {
-    background: color-mix(in srgb, var(--am-fg) 38%, transparent);
+    background: color-mix(in srgb, var(--am-fg) 26%, transparent);
   }
   .wrap {
     padding: 12px 10px;
@@ -314,32 +314,98 @@
     color: var(--am-fg);
   }
 
+  /* Quota Usage Row (under meter) */
+  .quota-row {
+    display: none;
+    grid-template-columns: repeat(auto-fit, minmax(112px, 1fr));
+    gap: 10px;
+    margin-top: 9px;
+    padding-top: 9px;
+    border-top: 1px solid var(--am-border);
+    font-size: 13px;
+    line-height: 1.25;
+    user-select: none;
+  }
+  .quota-row.visible {
+    display: grid;
+  }
+  .quota-group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 4px;
+    min-width: 0;
+  }
+  .quota-group.hidden {
+    display: none;
+  }
+  .quota-name {
+    font-size: 12px;
+    color: var(--am-muted);
+    font-weight: 600;
+    line-height: 1.2;
+    text-align: center;
+    white-space: nowrap;
+  }
+  .quota-rows {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .quota-item {
+    display: grid;
+    grid-template-columns: 18px 19px 38px;
+    align-items: center;
+    column-gap: 6px;
+    cursor: default;
+    padding: 1px 4px;
+    border-radius: 5px;
+  }
+  .quota-item.hidden {
+    display: none;
+  }
+  .quota-tag {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--am-muted);
+    text-align: right;
+    line-height: 1;
+  }
+  .quota-ring {
+    display: block;
+    width: 19px;
+    height: 19px;
+    flex-shrink: 0;
+    transform: rotate(-90deg);
+  }
+  .quota-ring-track {
+    fill: none;
+    stroke: color-mix(in srgb, var(--am-fg) 16%, transparent);
+    stroke-width: 2.7;
+  }
+  .quota-ring-fill {
+    fill: none;
+    stroke: var(--am-ok);
+    stroke-width: 2.7;
+    stroke-linecap: round;
+    transition: stroke-dashoffset 0.35s ease, stroke 0.35s ease;
+  }
+  .quota-pct {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--am-fg);
+    font-variant-numeric: tabular-nums;
+    text-align: left;
+    white-space: nowrap;
+    line-height: 1;
+  }
+
   /* Info Card */
   .info-card {
     display: flex;
     flex-direction: column;
     gap: 8px;
     padding: 10px 12px;
-  }
-  .dates-stack {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: 4px;
-    font-size: 14px;
-  }
-  .date-line {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    color: var(--am-muted);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-  }
-  .date-line strong {
-    color: var(--am-fg);
-    font-weight: 600;
   }
   .info-row {
     display: flex;
@@ -348,6 +414,9 @@
     justify-content: space-between;
     gap: 4px 8px;
     font-size: 14px;
+  }
+  .info-row.dates-row {
+    font-size: 13px;
   }
   .info-item {
     display: flex;
@@ -360,6 +429,9 @@
   .info-item strong {
     color: var(--am-fg);
     font-weight: 600;
+  }
+  .info-row.dates-row .info-item strong {
+    font-weight: 500;
   }
   .info-divider {
     height: 1px;
@@ -945,57 +1017,41 @@
     50% { opacity: 0.35; transform: scale(0.8); }
   }
 
-  /* Left Dot-Rail & Standalone Cards Stage */
+  /* Right Overlay Scroll Rail & Standalone Cards Stage */
   .cards-stage {
+    position: relative;
     display: flex;
     flex: 1 1 auto;
     min-height: 120px;
     align-items: stretch;
     gap: 0;
   }
-  .cards-dots {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 6px;
-    width: 0;
-    margin-right: 0;
-    opacity: 0;
-    overflow: hidden;
+  .cards-rail {
+    position: absolute;
+    right: -7px;
+    top: 2px;
+    bottom: 2px;
+    width: 3px;
     pointer-events: none;
-    flex-shrink: 0;
-    padding: 6px 0;
-    user-select: none;
-    transition: width 0.24s cubic-bezier(0.22, 1, 0.36, 1),
-                margin-right 0.24s cubic-bezier(0.22, 1, 0.36, 1),
-                opacity 0.2s ease;
+    opacity: 0;
+    transition: opacity 0.28s ease;
   }
-  .cards-dots.visible {
-    width: 10px;
-    margin-right: 6px;
+  .cards-rail.scrolling {
     opacity: 1;
-    pointer-events: auto;
+    transition: opacity 0.1s ease;
   }
-  .cards-dot {
-    width: 5px;
-    height: 5px;
-    padding: 0;
-    border: none;
-    border-radius: 50%;
-    background: color-mix(in srgb, var(--am-fg) 18%, transparent);
-    cursor: pointer;
-    transition: background-color 0.2s ease, transform 0.2s ease;
-  }
-  .cards-dot:hover {
-    background: color-mix(in srgb, var(--am-fg) 42%, transparent);
-    transform: scale(1.25);
-  }
-  .cards-dot.active {
-    background: color-mix(in srgb, var(--am-fg) 68%, transparent);
-    transform: scale(1.2);
+  .cards-rail-thumb {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    height: 24px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--am-fg) 15%, transparent);
+    will-change: transform, height;
   }
   .cards-viewport {
+    position: relative;
     flex: 1 1 auto;
     min-width: 0;
     overflow-y: auto;
@@ -1086,6 +1142,10 @@
   .block-head > .notes-actions-group .notes-action.is-pinned:hover:not(:disabled) {
     color: var(--am-accent);
     background: color-mix(in srgb, var(--am-accent) 12%, transparent);
+  }
+  .note-block:not(:focus-within) .block-head > .notes-actions-group .copy-btn:not(.is-checked) {
+    opacity: 0;
+    pointer-events: none;
   }
   .block-editor {
     width: 100%;
@@ -1381,13 +1441,58 @@
           <span id="t512" class="tick edge-right">512K</span>
         </div>
       </div>
+
+      <div id="quota-row" class="quota-row" aria-label="Model quota usage">
+        <div id="quota-gemini" class="quota-group">
+          <span class="quota-name">Gemini</span>
+          <div class="quota-rows">
+            <div id="q-g-w" class="quota-item" data-tip="">
+              <span class="quota-tag">W</span>
+              <svg class="quota-ring" viewBox="0 0 18 18" aria-hidden="true">
+                <circle class="quota-ring-track" cx="9" cy="9" r="6.6"/>
+                <circle class="quota-ring-fill" cx="9" cy="9" r="6.6" stroke-dasharray="41.47" stroke-dashoffset="41.47"/>
+              </svg>
+              <span class="quota-pct">—</span>
+            </div>
+            <div id="q-g-h" class="quota-item" data-tip="">
+              <span class="quota-tag">5h</span>
+              <svg class="quota-ring" viewBox="0 0 18 18" aria-hidden="true">
+                <circle class="quota-ring-track" cx="9" cy="9" r="6.6"/>
+                <circle class="quota-ring-fill" cx="9" cy="9" r="6.6" stroke-dasharray="41.47" stroke-dashoffset="41.47"/>
+              </svg>
+              <span class="quota-pct">—</span>
+            </div>
+          </div>
+        </div>
+        <div id="quota-other" class="quota-group">
+          <span class="quota-name">Other</span>
+          <div class="quota-rows">
+            <div id="q-o-w" class="quota-item" data-tip="">
+              <span class="quota-tag">W</span>
+              <svg class="quota-ring" viewBox="0 0 18 18" aria-hidden="true">
+                <circle class="quota-ring-track" cx="9" cy="9" r="6.6"/>
+                <circle class="quota-ring-fill" cx="9" cy="9" r="6.6" stroke-dasharray="41.47" stroke-dashoffset="41.47"/>
+              </svg>
+              <span class="quota-pct">—</span>
+            </div>
+            <div id="q-o-h" class="quota-item" data-tip="">
+              <span class="quota-tag">5h</span>
+              <svg class="quota-ring" viewBox="0 0 18 18" aria-hidden="true">
+                <circle class="quota-ring-track" cx="9" cy="9" r="6.6"/>
+                <circle class="quota-ring-fill" cx="9" cy="9" r="6.6" stroke-dasharray="41.47" stroke-dashoffset="41.47"/>
+              </svg>
+              <span class="quota-pct">—</span>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- Info Card -->
     <div class="card info-card">
-      <div class="dates-stack">
-        <div class="date-line"><span>First</span> <strong id="first-ts">—</strong></div>
-        <div class="date-line"><span>Last</span> <strong id="last-ts">—</strong></div>
+      <div class="info-row dates-row">
+        <div class="info-item">First <strong id="first-ts">—</strong></div>
+        <div class="info-item">Last <strong id="last-ts">—</strong></div>
       </div>
       <div class="info-divider"></div>
       <div class="info-row">
@@ -1431,10 +1536,10 @@
     <!-- About Card -->
     <div id="about-card" class="about-card">
       <div class="about-head">
-        <span class="about-title">Antimetro v1.2.0</span>
+        <span class="about-title">Antimetro v1.3.0</span>
         <span class="about-author">by izomondo</span>
       </div>
-      <div class="about-compat">Tested on Antigravity 2.34.0</div>
+      <div class="about-compat">Tested on Antigravity 2.35.1</div>
       <div class="about-links">
         <a class="about-link" href="https://github.com/izomondo/antimetro" target="_blank" rel="noopener noreferrer">
           GitHub
@@ -1500,7 +1605,7 @@
     </div>
 
     <div id="ws-stage" class="cards-stage">
-      <div id="ws-dots" class="cards-dots" aria-hidden="true"></div>
+      <div id="ws-rail" class="cards-rail" aria-hidden="true"><div id="ws-rail-thumb" class="cards-rail-thumb"></div></div>
       <div id="ws-viewport" class="cards-viewport"></div>
     </div>
   </div>
@@ -1522,8 +1627,8 @@
   const MAX_NOTE_CARDS = 200;
   const DRAFT_KEY = "__draft__";
   const MONTHS = [
-    "January", "February", "March", "April", "May", "June",
-    "July", "August", "September", "October", "November", "December"
+    "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+    "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
   ];
 
   const state = {
@@ -1540,6 +1645,12 @@
       auto_compact_threshold: 250000,
     },
     lastData: null,
+    wasBusy: false,
+    quotaTimer: null,
+    quotaAfterTurnTimer: null,
+    lastQuotaForceAt: 0,
+    lastQuotaTokens: -1,
+    lastQuotaConv: "",
     hadNetError: false,
     convTracked: "",
     baselineStep: null,
@@ -1841,10 +1952,9 @@
     if (isNaN(d.getTime())) return "—";
     const dd = d.getDate();
     const mon = MONTHS[d.getMonth()];
-    const yyyy = d.getFullYear();
     const hh = String(d.getHours()).padStart(2, "0");
     const mm = String(d.getMinutes()).padStart(2, "0");
-    return dd + " " + mon + " " + yyyy + ", " + hh + ":" + mm;
+    return dd + " " + mon + ", " + hh + ":" + mm;
   }
 
   function isCompactBlocked() {
@@ -2730,117 +2840,60 @@
     });
   }
 
-  /* Left Dot Scrollbar (Antigravity style) */
-  let dotsAnimStopAt = 0;
-  let dotsAnimRaf = 0;
+  /* Left Overlay Scroll Rail (auto-hiding 3px bar in outer margin, zero layout shift) */
+  let railHideTimer = null;
 
-  function syncDots(viewport, dotsEl) {
+  function syncScrollRail(viewport, reveal) {
     const vp = viewport || $("ws-viewport");
-    const dots = dotsEl || $("ws-dots");
-    if (!vp || !dots) return;
-    const overflow = vp.scrollHeight - vp.clientHeight;
-    const items = Array.from(vp.children).filter(
-      (el) => el.classList.contains("note-block") || el.classList.contains("search-block")
-    );
-    if (overflow <= 2 || items.length <= 1) {
-      dots.classList.remove("visible");
+    const rail = $("ws-rail");
+    const thumb = $("ws-rail-thumb");
+    if (!vp || !rail || !thumb) return;
+    const maxScroll = vp.scrollHeight - vp.clientHeight;
+    if (maxScroll <= 4) {
+      if (railHideTimer) {
+        clearTimeout(railHideTimer);
+        railHideTimer = null;
+      }
+      rail.classList.remove("scrolling");
       return;
     }
+    const trackH = rail.clientHeight || vp.clientHeight;
+    if (trackH <= 0) return;
+    const thumbH = Math.max(24, Math.min(trackH, Math.round((vp.clientHeight / vp.scrollHeight) * trackH)));
+    const travel = Math.max(0, trackH - thumbH);
+    const ratio = Math.max(0, Math.min(1, vp.scrollTop / maxScroll));
+    const y = Math.round(ratio * travel);
+    thumb.style.height = thumbH + "px";
+    thumb.style.transform = "translateY(" + y + "px)";
 
-    dots.classList.add("visible");
-    const count = Math.min(items.length, 14);
-    if (dots.dataset.count !== String(count)) {
-      dots.dataset.count = String(count);
-      dots.innerHTML = "";
-      for (let i = 0; i < count; i++) {
-        const dot = document.createElement("button");
-        dot.type = "button";
-        dot.className = "cards-dot";
-        dot.tabIndex = -1;
-        dot.addEventListener("click", (e) => {
-          e.stopPropagation();
-          const liveItems = Array.from(vp.children).filter(
-            (el) => el.classList.contains("note-block") || el.classList.contains("search-block")
-          );
-          const liveCount = Math.min(liveItems.length, 14);
-          const maxScroll = Math.max(0, vp.scrollHeight - vp.clientHeight);
-          if (liveItems.length === liveCount) {
-            const target = liveItems[i];
-            if (target) {
-              vp.scrollTo({ top: Math.min(maxScroll, target.offsetTop), behavior: "smooth" });
-            }
-          } else {
-            const ratio = liveCount > 1 ? i / (liveCount - 1) : 0;
-            vp.scrollTo({ top: Math.round(maxScroll * ratio), behavior: "smooth" });
-          }
-        });
-        dots.appendChild(dot);
-      }
+    if (reveal) {
+      rail.classList.add("scrolling");
+      if (railHideTimer) clearTimeout(railHideTimer);
+      railHideTimer = setTimeout(() => {
+        railHideTimer = null;
+        rail.classList.remove("scrolling");
+      }, 550);
     }
-
-    const maxScroll = Math.max(1, vp.scrollHeight - vp.clientHeight);
-    let activeIdx = 0;
-    if (vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 3) {
-      activeIdx = count - 1;
-    } else if (items.length === count) {
-      let best = 0;
-      for (let i = 0; i < items.length; i++) {
-        if (items[i].offsetTop <= vp.scrollTop + 28) {
-          best = i;
-        } else {
-          break;
-        }
-      }
-      activeIdx = best;
-    } else {
-      activeIdx = Math.round((vp.scrollTop / maxScroll) * (count - 1));
-    }
-
-    const dotBtns = dots.querySelectorAll(".cards-dot");
-    dotBtns.forEach((d, idx) => d.classList.toggle("active", idx === activeIdx));
   }
 
-  function trackDotsDuringAnim(ms) {
-    const end = Date.now() + (ms || 360);
-    if (end > dotsAnimStopAt) dotsAnimStopAt = end;
-    if (dotsAnimRaf) return;
-    const step = () => {
-      dotsAnimRaf = 0;
-      syncDots($("ws-viewport"), $("ws-dots"));
-      if (Date.now() < dotsAnimStopAt) {
-        dotsAnimRaf = requestAnimationFrame(step);
-      }
-    };
-    dotsAnimRaf = requestAnimationFrame(step);
-  }
-
-  function bindDotViewport(viewportId, dotsId) {
+  function bindScrollRail(viewportId) {
     const vp = $(viewportId);
-    const dots = $(dotsId);
-    if (!vp || !dots) return;
-    vp.addEventListener("scroll", () => syncDots(vp, dots), { passive: true });
-    vp.addEventListener("transitionend", () => syncDots(vp, dots), { passive: true });
-    dots.addEventListener("transitionend", (e) => {
-      if (e.propertyName === "width") {
-        recalcVisibleCardsHeights();
-      }
-    });
+    if (!vp) return;
+    vp.addEventListener("scroll", () => syncScrollRail(vp, true), { passive: true });
     if (typeof ResizeObserver === "function") {
-      const ro = new ResizeObserver(() => syncDots(vp, dots));
+      const ro = new ResizeObserver(() => syncScrollRail(vp, false));
       ro.observe(vp);
     }
-    if (typeof MutationObserver === "function") {
-      const mo = new MutationObserver(() => syncDots(vp, dots));
-      mo.observe(vp, { childList: true });
-    }
   }
-  bindDotViewport("ws-viewport", "ws-dots");
+  bindScrollRail("ws-viewport");
 
   const wsWheel = {
     rafId: 0,
     lastTs: 0,
     el: null,
     rem: 0,
+    carryIn: 0,
+    carryVp: 0,
     rate: 11.5,
   };
 
@@ -2852,13 +2905,23 @@
     wsWheel.lastTs = 0;
     wsWheel.el = null;
     wsWheel.rem = 0;
+    wsWheel.carryIn = 0;
+    wsWheel.carryVp = 0;
   }
 
   function isScrollableCardInner(el) {
     if (!el || !el.isConnected) return false;
     if (el.scrollHeight <= el.clientHeight + 1) return false;
     if (el.style.overflowY === "auto") return true;
-    return el.classList.contains("block-editor") && Boolean(el.closest(".note-block.is-solo"));
+    if (el.classList.contains("block-editor")) {
+      const card = el.closest(".note-block");
+      return Boolean(card && (card.classList.contains("is-solo") || card.classList.contains("expanded")));
+    }
+    if (el.classList.contains("search-body")) {
+      const card = el.closest(".search-block");
+      return Boolean(card && card.classList.contains("expanded"));
+    }
+    return false;
   }
 
   function stepWsWheel(ts) {
@@ -2880,35 +2943,69 @@
     const el = isScrollableCardInner(wsWheel.el) ? wsWheel.el : null;
     if (!el) {
       wsWheel.el = null;
+      wsWheel.carryIn = 0;
     } else {
-      const before = el.scrollTop;
       const maxIn = Math.max(0, el.scrollHeight - el.clientHeight);
-      el.scrollTop = Math.max(0, Math.min(maxIn, before + step));
-      const movedInner = el.scrollTop - before;
-      leftover = step - movedInner;
-      if ((step > 0 && el.scrollTop >= maxIn - 0.5) || (step < 0 && el.scrollTop <= 0.5)) {
+      const atEdgeBefore = (step > 0 && el.scrollTop >= maxIn - 0.5) || (step < 0 && el.scrollTop <= 0.5);
+      if (atEdgeBefore) {
         wsWheel.el = null;
+        wsWheel.carryIn = 0;
+      } else {
+        wsWheel.carryIn += step;
+        const intStep = Math.trunc(wsWheel.carryIn);
+        if (intStep !== 0) {
+          const before = el.scrollTop;
+          const nextTop = Math.max(0, Math.min(maxIn, before + intStep));
+          el.scrollTop = nextTop;
+          const movedInner = el.scrollTop - before;
+          wsWheel.carryIn -= movedInner;
+          const atEdgeAfter = (step > 0 && el.scrollTop >= maxIn - 0.5) || (step < 0 && el.scrollTop <= 0.5);
+          if (atEdgeAfter) {
+            leftover = wsWheel.carryIn;
+            wsWheel.carryIn = 0;
+            wsWheel.el = null;
+          } else {
+            leftover = 0;
+          }
+        } else {
+          leftover = 0;
+        }
       }
     }
 
-    if (Math.abs(leftover) > 0.01) {
+    if (Math.abs(leftover) > 0.001) {
       const maxVp = Math.max(0, vp.scrollHeight - vp.clientHeight);
       if (maxVp > 1) {
-        const beforeVp = vp.scrollTop;
-        vp.scrollTop = Math.max(0, Math.min(maxVp, beforeVp + leftover));
-        const movedVp = vp.scrollTop - beforeVp;
-        if (Math.abs(leftover - movedVp) > 0.5 && ((leftover > 0 && vp.scrollTop >= maxVp - 0.5) || (leftover < 0 && vp.scrollTop <= 0.5))) {
+        const atVpEdgeBefore = (leftover > 0 && vp.scrollTop >= maxVp - 0.5) || (leftover < 0 && vp.scrollTop <= 0.5);
+        if (atVpEdgeBefore) {
           wsWheel.rem = 0;
+          wsWheel.carryVp = 0;
+        } else {
+          wsWheel.carryVp += leftover;
+          const intVp = Math.trunc(wsWheel.carryVp);
+          if (intVp !== 0) {
+            const beforeVp = vp.scrollTop;
+            vp.scrollTop = Math.max(0, Math.min(maxVp, beforeVp + intVp));
+            const movedVp = vp.scrollTop - beforeVp;
+            wsWheel.carryVp -= movedVp;
+            if ((leftover > 0 && vp.scrollTop >= maxVp - 0.5) || (leftover < 0 && vp.scrollTop <= 0.5)) {
+              wsWheel.rem = 0;
+              wsWheel.carryVp = 0;
+            }
+          }
         }
-      } else {
+      } else if (!wsWheel.el) {
         wsWheel.rem = 0;
+        wsWheel.carryVp = 0;
       }
     }
 
-    if (Math.abs(wsWheel.rem) > 0.25) {
+    if (Math.abs(wsWheel.rem) > 0.25 || Math.abs(wsWheel.carryIn) >= 0.5 || Math.abs(wsWheel.carryVp) >= 0.5) {
       wsWheel.rafId = requestAnimationFrame(stepWsWheel);
     } else {
       wsWheel.rem = 0;
+      wsWheel.carryIn = 0;
+      wsWheel.carryVp = 0;
       wsWheel.lastTs = 0;
     }
   }
@@ -2947,10 +3044,16 @@
       }
 
       e.preventDefault();
-      wsWheel.el = innerRoom > 0.5 ? el : null;
+      const nextEl = innerRoom > 0.5 ? el : null;
+      if (wsWheel.el !== nextEl) {
+        wsWheel.carryIn = 0;
+      }
+      wsWheel.el = nextEl;
       wsWheel.rate = e.deltaMode === 0 && Math.abs(dy) < 40 ? 22 : 11.5;
       if ((wsWheel.rem > 0 && dy < 0) || (wsWheel.rem < 0 && dy > 0)) {
         wsWheel.rem = 0;
+        wsWheel.carryIn = 0;
+        wsWheel.carryVp = 0;
       }
       wsWheel.rem += dy;
 
@@ -3031,12 +3134,11 @@
     void editor.offsetHeight;
     editor.classList.add("is-animating");
     editor.style.height = targetH + "px";
-    trackDotsDuringAnim(340);
     editor._animTimer = setTimeout(() => {
       editor._animTimer = null;
       editor.classList.remove("is-animating");
       editor.style.overflowY = overflowAfter;
-      syncDots($("ws-viewport"), $("ws-dots"));
+      syncScrollRail($("ws-viewport"), false);
     }, 295);
   }
 
@@ -3129,7 +3231,7 @@
     return { full, target };
   }
 
-  function keepNextCardVisible(cardEl, smooth) {
+  function keepCardHeaderVisible(cardEl, smooth) {
     const vp = $("ws-viewport");
     if (!vp || !cardEl) return;
     if (cardEl.offsetTop < vp.scrollTop) {
@@ -3138,36 +3240,21 @@
       } else {
         vp.scrollTop = cardEl.offsetTop;
       }
-      return;
-    }
-    const nextCard = cardEl.nextElementSibling;
-    if (nextCard && nextCard.classList.contains("note-block")) {
-      const needTop = (nextCard.offsetTop + nextCard.offsetHeight + 4) - vp.clientHeight;
-      if (needTop > vp.scrollTop) {
-        const dest = Math.min(cardEl.offsetTop, Math.max(0, needTop));
-        if (smooth) {
-          vp.scrollTo({ top: dest, behavior: "smooth" });
-        } else {
-          vp.scrollTop = dest;
-        }
-      }
-    } else if (smooth) {
-      cardEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
     }
   }
 
   function collapseNoteCard(cardEl) {
     if (!cardEl || !cardEl.classList.contains("expanded")) return;
     const editor = cardEl.querySelector(".block-editor");
-    if (cardEl.classList.contains("is-solo")) {
+    const cardId = Number(cardEl.dataset.cardId);
+    const card = state.notes.cards.find((c) => c.id === cardId);
+    if (cardEl.classList.contains("is-solo") && (!card || !card.text.trim())) {
       if (editor && document.activeElement === editor) {
         editor.blur();
       }
       flushNoteSave();
       return;
     }
-    const cardId = Number(cardEl.dataset.cardId);
-    const card = state.notes.cards.find((c) => c.id === cardId);
     if (document.activeElement === editor) {
       editor.blur();
     }
@@ -3189,9 +3276,9 @@
       saveNotesFor(key, currentNotesSnapshot(), state.notes.seq, false);
       return;
     }
+    const startH = editor.offsetHeight || NOTES_COLLAPSED_PX;
     cardEl.classList.remove("is-solo", "is-solo-empty");
     flushNoteSave();
-    const startH = editor.offsetHeight || NOTES_COLLAPSED_PX;
     const { full, target } = measureNoteEditorHeight(cardEl, editor, false);
     cardEl.classList.remove("expanded");
     editor.classList.toggle("is-clipped", full > target + 2);
@@ -3212,9 +3299,11 @@
 
   function expandNoteCard(cardEl, focusEditor) {
     const id = Number(cardEl.dataset.cardId);
+    const wasExpanded = cardEl.classList.contains("expanded");
     collapseAllNoteCards(id);
     const editor = cardEl.querySelector(".block-editor");
     const isSolo = cardEl.classList.contains("is-solo");
+    const savedScroll = wasExpanded ? editor.scrollTop : 0;
     cardEl.classList.add("expanded");
     editor.classList.remove("is-clipped");
     state.notes.expandedCardId = id;
@@ -3223,9 +3312,10 @@
       const startH = editor.offsetHeight || NOTES_COLLAPSED_PX;
       const { full, target } = measureNoteEditorHeight(cardEl, editor, true);
       animateNoteEditorHeight(editor, startH, target, full > target ? "auto" : "hidden");
+      editor.scrollTop = savedScroll;
       setTimeout(() => {
-        keepNextCardVisible(cardEl, true);
-        syncDots($("ws-viewport"), $("ws-dots"));
+        keepCardHeaderVisible(cardEl, true);
+        syncScrollRail($("ws-viewport"), false);
       }, 305);
     }
     if (focusEditor) {
@@ -3233,6 +3323,14 @@
         editor.focus({ preventScroll: true });
       } catch (_) {
         editor.focus();
+      }
+      if (!wasExpanded) {
+        editor.scrollTop = 0;
+        requestAnimationFrame(() => {
+          if (cardEl.classList.contains("expanded")) {
+            editor.scrollTop = 0;
+          }
+        });
       }
     }
   }
@@ -3260,7 +3358,7 @@
 
     const copyBtn = document.createElement("button");
     copyBtn.type = "button";
-    copyBtn.className = "notes-action";
+    copyBtn.className = "notes-action copy-btn";
     setTip(copyBtn, "Copy card");
     copyBtn.setAttribute("aria-label", "Copy card");
     copyBtn.innerHTML = ICON_COPY;
@@ -3293,8 +3391,8 @@
       }
     });
 
-    leftGroup.appendChild(copyBtn);
     leftGroup.appendChild(pinBtn);
+    leftGroup.appendChild(copyBtn);
     leftGroup.appendChild(saveDot);
 
     const delWrap = document.createElement("div");
@@ -3388,10 +3486,10 @@
           const { full, target } = applyAutoGrowHeight(editor, 22, maxH);
           editor.classList.toggle("is-clipped", !expanded && full > target + 2);
           if (expanded) {
-            keepNextCardVisible(el, false);
+            keepCardHeaderVisible(el, false);
           }
         }
-        syncDots($("ws-viewport"), $("ws-dots"));
+        syncScrollRail($("ws-viewport"), false);
         if (card.id > 0) {
           scheduleNoteSave(card.id);
         }
@@ -3464,16 +3562,7 @@
       const el = buildNoteBlockElement(soloCard, true);
       vp.appendChild(el);
       syncCardSaveDots();
-      requestAnimationFrame(() => syncDots(vp, $("ws-dots")));
-      return;
-    }
-    if (state.notes.cards.length === 1) {
-      const soloCard = state.notes.cards[0];
-      const el = buildNoteBlockElement(soloCard, true);
-      vp.appendChild(el);
-      state.notes.expandedCardId = soloCard.id;
-      syncCardSaveDots();
-      requestAnimationFrame(() => syncDots(vp, $("ws-dots")));
+      requestAnimationFrame(() => syncScrollRail(vp, false));
       return;
     }
     for (const card of state.notes.cards) {
@@ -3484,7 +3573,7 @@
       editor.classList.toggle("is-clipped", full > target + 2);
     }
     syncCardSaveDots();
-    requestAnimationFrame(() => syncDots(vp, $("ws-dots")));
+    requestAnimationFrame(() => syncScrollRail(vp, false));
   }
 
   function renderWorkspace() {
@@ -3598,7 +3687,7 @@
       onBeforePlay();
     }
 
-    setTimeout(() => syncDots(vp, $("ws-dots")), 365);
+    setTimeout(() => syncScrollRail(vp, false), 365);
   }
 
   function togglePinNoteCard(cardId) {
@@ -3888,7 +3977,7 @@
         ed.classList.toggle("is-clipped", !expanded && full > target + 2);
       });
     }
-    syncDots(vp, $("ws-dots"));
+    syncScrollRail(vp, false);
   }
 
   /* Chat Context Search */
@@ -4058,7 +4147,7 @@
     body.scrollTop = 0;
     body.style.overflowY = "hidden";
     body.style.height = targetH + "px";
-    trackDotsDuringAnim(340);
+    setTimeout(() => syncScrollRail($("ws-viewport"), false), 300);
   }
 
   function collapseAllSearchBlocks(exceptEl) {
@@ -4103,7 +4192,6 @@
 
     cardEl.classList.add("expanded");
     body.style.height = targetH + "px";
-    trackDotsDuringAnim(340);
 
     if (markCenterY >= 0) {
       const animEnd = Date.now() + 310;
@@ -4121,7 +4209,7 @@
     }
     setTimeout(() => {
       cardEl.scrollIntoView({ block: "nearest", behavior: "smooth" });
-      syncDots($("ws-viewport"), $("ws-dots"));
+      syncScrollRail($("ws-viewport"), false);
     }, 300);
   }
 
@@ -4189,7 +4277,7 @@
       vp.innerHTML = isAllScope
         ? '<div class="search-empty">Type to search all chats &amp; notes</div>'
         : '<div class="search-empty">Type to search this chat &amp; its notes</div>';
-      syncDots(vp, $("ws-dots"));
+      syncScrollRail(vp, false);
       return;
     }
 
@@ -4203,7 +4291,7 @@
       countEl.textContent = "0";
       countEl.classList.add("visible");
       vp.innerHTML = '<div class="search-empty">No matches found</div>';
-      syncDots(vp, $("ws-dots"));
+      syncScrollRail(vp, false);
       return;
     }
 
@@ -4294,7 +4382,7 @@
     }
 
     vp.scrollTop = 0;
-    requestAnimationFrame(() => syncDots(vp, $("ws-dots")));
+    requestAnimationFrame(() => syncScrollRail(vp, false));
   }
 
   async function runChatSearch() {
@@ -4638,6 +4726,109 @@
     if (e.key === "Escape") closeCtxMenu();
   });
 
+  function fmtResetIn(iso) {
+    if (!iso) return "";
+    const ts = Date.parse(iso);
+    if (!Number.isFinite(ts)) return "";
+    const diffSec = Math.floor((ts - Date.now()) / 1000);
+    if (diffSec <= 0) return "";
+    const mins = Math.floor(diffSec / 60);
+    const hrs = Math.floor(mins / 60);
+    const days = Math.floor(hrs / 24);
+    if (days >= 2) return days + "d";
+    if (days === 1) {
+      const remH = hrs % 24;
+      return remH > 0 ? ("1d " + remH + "h") : "1d";
+    }
+    if (hrs >= 1) {
+      const remM = mins % 60;
+      return remM > 0 ? (hrs + "h " + remM + "m") : (hrs + "h");
+    }
+    return Math.max(1, mins) + "m";
+  }
+
+  const QUOTA_CIRC = 41.47;
+
+  function quotaColor(pct) {
+    if (pct <= 30) return "var(--am-crit)";
+    if (pct <= 65) return "var(--am-warn1)";
+    return "var(--am-ok)";
+  }
+
+  function applyQuotaBucket(elId, bucket) {
+    const el = $(elId);
+    if (!el) return;
+    if (!bucket) {
+      el.classList.add("hidden");
+      setTip(el, "");
+      return;
+    }
+    el.classList.remove("hidden");
+    const pct = Math.max(0, Math.min(100, Math.round(Number(bucket.pct) || 0)));
+    const fill = el.querySelector(".quota-ring-fill");
+    if (fill) {
+      fill.style.stroke = quotaColor(pct);
+      fill.style.strokeDashoffset = (QUOTA_CIRC * (1 - pct / 100)).toFixed(2);
+      fill.style.opacity = pct <= 0 ? "0" : "1";
+    }
+    const pctEl = el.querySelector(".quota-pct");
+    if (pctEl) {
+      pctEl.textContent = pct + "%";
+    }
+    const resetStr = fmtResetIn(bucket.reset_time);
+    setTip(el, resetStr ? ("Resets in " + resetStr) : "");
+  }
+
+  function renderQuota(q) {
+    const row = $("quota-row");
+    if (!row) return;
+    if (!q || !q.available) {
+      row.classList.remove("visible");
+      return;
+    }
+    const gEl = $("quota-gemini");
+    const oEl = $("quota-other");
+    const hasG = Boolean(q.gemini && (q.gemini.weekly || q.gemini.five_hour));
+    const hasO = Boolean(q.other && (q.other.weekly || q.other.five_hour));
+    if (!hasG && !hasO) {
+      row.classList.remove("visible");
+      return;
+    }
+    if (gEl) gEl.classList.toggle("hidden", !hasG);
+    if (oEl) oEl.classList.toggle("hidden", !hasO);
+    if (hasG) {
+      applyQuotaBucket("q-g-w", q.gemini.weekly);
+      applyQuotaBucket("q-g-h", q.gemini.five_hour);
+    }
+    if (hasO) {
+      applyQuotaBucket("q-o-w", q.other.weekly);
+      applyQuotaBucket("q-o-h", q.other.five_hour);
+    }
+    row.classList.add("visible");
+  }
+
+  async function fetchQuota(force) {
+    try {
+      const url = force ? "/api/quota?force=1" : "/api/quota";
+      const res = await apiFetch(url, { method: "GET" });
+      if (!res.ok) return;
+      const data = await res.json();
+      renderQuota(data);
+    } catch (_) {
+    }
+  }
+
+  function scheduleQuotaLoop() {
+    if (state.quotaTimer) clearTimeout(state.quotaTimer);
+    state.quotaTimer = setTimeout(async () => {
+      state.quotaTimer = null;
+      if (!document.hidden) {
+        await fetchQuota(false);
+      }
+      scheduleQuotaLoop();
+    }, 60000);
+  }
+
   function render(d) {
     const conv = currentConv();
     const key = convKey(conv);
@@ -4753,6 +4944,31 @@
       $("undo-compact-btn").classList.toggle("visible", canUndo);
     }
 
+    const nowBusy = Boolean(d.is_busy || d.compact_in_flight);
+    if (state.lastQuotaConv !== conv) {
+      state.lastQuotaConv = conv;
+      state.lastQuotaTokens = tokens;
+    } else if (nowBusy && tokens !== state.lastQuotaTokens) {
+      state.lastQuotaTokens = tokens;
+      const nowMs = Date.now();
+      if (!document.hidden && (nowMs - state.lastQuotaForceAt) >= 15000) {
+        state.lastQuotaForceAt = nowMs;
+        fetchQuota(true);
+      }
+    }
+    if (state.wasBusy && !nowBusy) {
+      state.lastQuotaTokens = tokens;
+      if (state.quotaAfterTurnTimer) clearTimeout(state.quotaAfterTurnTimer);
+      state.quotaAfterTurnTimer = setTimeout(() => {
+        state.quotaAfterTurnTimer = null;
+        if (!document.hidden) {
+          state.lastQuotaForceAt = Date.now();
+          fetchQuota(true);
+        }
+      }, 2000);
+    }
+    state.wasBusy = nowBusy;
+
     evaluateAutoCompact(d);
     refreshCompactBtnDisabled();
   }
@@ -4831,6 +5047,7 @@
     } else if (state.timer) {
       clearTimeout(state.timer);
       poll();
+      fetchQuota(false);
     }
   });
 
@@ -4857,6 +5074,8 @@
   syncThresholdWidth();
   syncNotesConv(currentConv());
   poll();
+  fetchQuota(false);
+  scheduleQuotaLoop();
 })();
 </script>
 </body>

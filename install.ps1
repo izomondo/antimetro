@@ -30,7 +30,7 @@ if (-not (Get-Command link.exe -ErrorAction SilentlyContinue)) {
     }
 }
 
-Write-Host "1/3 Building Antimetro v1.2.0 (Rust release)..." -ForegroundColor Cyan
+Write-Host "1/3 Building Antimetro v1.3.0 (Rust release)..." -ForegroundColor Cyan
 Push-Location $root
 try {
     cargo build --release
@@ -57,7 +57,7 @@ Copy-Item -Path (Join-Path $root "assets\logo.svg") -Destination (Join-Path $ass
 $pluginJson = "{`n" +
   "  `"name`": `"antimetro`",`n" +
   "  `"displayName`": `"Antimetro`",`n" +
-  "  `"version`": `"1.2.0`",`n" +
+  "  `"version`": `"1.3.0`",`n" +
   "  `"description`": `"Live context token meter, smart auto-compact, per-chat notes, and full transcript search for Antigravity App 2.0.`",`n" +
   "  `"logo`": `"assets/logo.svg`",`n" +
   "  `"author`": {`n" +
@@ -95,5 +95,5 @@ $sidecarJson = "{`n" +
 [System.IO.File]::WriteAllText((Join-Path $sidecarDir "sidecar.json"), $sidecarJson, $utf8NoBom)
 
 $kb = [math]::Round((Get-Item $exeDst).Length / 1KB, 1)
-Write-Host "3/3 DONE! Antimetro v1.2.0 installed ($kb KB)." -ForegroundColor Green
+Write-Host "3/3 DONE! Antimetro v1.3.0 installed ($kb KB)." -ForegroundColor Green
 Write-Host "Fully restart Antigravity (including the tray icon) to load the update." -ForegroundColor Yellow
