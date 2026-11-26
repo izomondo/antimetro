@@ -10,7 +10,7 @@ use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const UI_HTML: &str = include_str!("ui.html");
-const FALLBACK_PRELOAD: &str = r#"(function(){const p=new URLSearchParams(location.search);const t=p.get('token');window.sidecar={conversationId:p.get('conversationId')||'',fetch:(u,o={})=>{const h=new Headers(o.headers||{});if(o.method&&o.method!=='GET')h.set('Content-Type','application/json');if(t)h.set('X-Sidecar-Token',t);return fetch(u,{...o,headers:h});}};})();"#;
+const FALLBACK_PRELOAD: &str = r#"(function(){const p=new URLSearchParams(location.search);const t=p.get('token');window.sidecar={conversationId:p.get('conversationId')||'',fetch:(u,o={})=>{const h=new Headers(o.headers||{});if(o.method&&o.method!=='GET')h.set('Content-Type','application/json');if(t)h.set('X-Sidecar-Token',t);return fetch(u,{...o,headers:h});},ui:{toggleAuxPane:r=>window.parent&&window.parent!==window&&window.parent.postMessage({type:'toggle-aux-pane',payload:r},'*'),toggleConversation:(c,o)=>window.parent&&window.parent!==window&&window.parent.postMessage({type:'toggle-conversation',payload:o&&typeof o==='object'?{conversationId:c,...o}:{conversationId:c}},'*')}};})();"#;
 
 const MAX_AUTO_COMPACT_TOKENS: u64 = 500_000;
 const MIN_AUTO_COMPACT_TOKENS: u64 = 10_000;
@@ -112,6 +112,8 @@ struct SettingsStore {
     has_pending_draft: bool,
     cutoffs: HashMap<String, RevertCutoff>,
     cutoff_order: Vec<String>,
+    update_checked_at: u64,
+    latest_version: String,
     rev: u64,
     path: PathBuf,
 }
@@ -410,6 +412,8 @@ fn main() {
             has_pending_draft,
             cutoffs: loaded.cutoffs,
             cutoff_order: loaded.cutoff_order,
+            update_checked_at: loaded.update_checked_at,
+            latest_version: loaded.latest_version,
             rev: 1,
             path: settings_path,
         })),
@@ -433,12 +437,21 @@ fn main() {
     let _ = std::io::stdout().flush();
 
     for stream in listener.incoming().flatten() {
-        let acquired = state
-            .active_conns
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |c| {
-                (c < MAX_ACTIVE_CONNECTIONS).then_some(c + 1)
-            })
-            .is_ok();
+        let mut cur = state.active_conns.load(Ordering::Acquire);
+        let acquired = loop {
+            if cur >= MAX_ACTIVE_CONNECTIONS {
+                break false;
+            }
+            match state.active_conns.compare_exchange_weak(
+                cur,
+                cur + 1,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => break true,
+                Err(next) => cur = next,
+            }
+        };
         if !acquired {
             continue;
         }
@@ -542,6 +555,8 @@ struct LoadedStoreData {
     draft_updated_at: u64,
     cutoffs: HashMap<String, RevertCutoff>,
     cutoff_order: Vec<String>,
+    update_checked_at: u64,
+    latest_version: String,
 }
 
 fn is_draft_conv(conv: &str) -> bool {
@@ -643,7 +658,11 @@ fn save_settings_store(store: &SettingsStore) -> std::io::Result<()> {
             ));
         }
     }
-    out.push_str("}}");
+    out.push_str("},\"update\":{\"checked_at\":");
+    out.push_str(&store.update_checked_at.to_string());
+    out.push_str(",\"latest_version\":\"");
+    out.push_str(&json_escape(&store.latest_version));
+    out.push_str("\"}}");
 
     atomic_write_file(&store.path, out.as_bytes(), "json.tmp")
 }
@@ -876,6 +895,26 @@ fn handle_client(mut stream: TcpStream, state: &AppState) {
             }
             ("POST", "/api/settings") => {
                 let (status, body) = handle_post_settings(state, &req_body);
+                send_response(
+                    &mut stream,
+                    status,
+                    "application/json; charset=utf-8",
+                    body.as_bytes(),
+                    keep_alive,
+                );
+            }
+            ("GET", "/api/update-state") => {
+                let body = handle_get_update_state(state);
+                send_response(
+                    &mut stream,
+                    200,
+                    "application/json; charset=utf-8",
+                    body.as_bytes(),
+                    keep_alive,
+                );
+            }
+            ("POST", "/api/update-state") => {
+                let (status, body) = handle_post_update_state(state, &req_body);
                 send_response(
                     &mut stream,
                     status,
@@ -1199,6 +1238,133 @@ fn handle_post_settings(state: &AppState, body: &[u8]) -> (u16, String) {
     store.rev = store.rev.saturating_add(1);
     let json = format!(r#"{{"ok":true,"settings":{}}}"#, next.to_json());
     (200, json)
+}
+
+fn is_clean_semver(s: &str) -> bool {
+    let clean = s.trim().trim_start_matches(['v', 'V']);
+    if clean.len() < 5 || clean.len() > 24 {
+        return false;
+    }
+    let Some((core, pre)) = clean
+        .split_once('-')
+        .map(|(a, b)| (a, Some(b)))
+        .or(Some((clean, None)))
+    else {
+        return false;
+    };
+    let mut parts = core.split('.');
+    let (Some(maj), Some(min), Some(pat), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return false;
+    };
+    let core_ok = [maj, min, pat]
+        .iter()
+        .all(|p| !p.is_empty() && p.len() <= 6 && p.bytes().all(|b| b.is_ascii_digit()));
+    if !core_ok {
+        return false;
+    }
+    if let Some(suffix) = pre {
+        if suffix.is_empty()
+            || !suffix
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'.' || b == b'-')
+        {
+            return false;
+        }
+    }
+    true
+}
+
+fn normalize_semver(s: &str) -> Option<String> {
+    let clean = s.trim().trim_start_matches(['v', 'V']);
+    if is_clean_semver(clean) {
+        Some(clean.to_string())
+    } else {
+        None
+    }
+}
+
+fn handle_get_update_state(state: &AppState) -> String {
+    match state.settings.lock() {
+        Ok(store) => format!(
+            r#"{{"checked_at":{},"latest_version":"{}"}}"#,
+            store.update_checked_at,
+            json_escape(&store.latest_version)
+        ),
+        Err(_) => r#"{"checked_at":0,"latest_version":""}"#.to_string(),
+    }
+}
+
+fn handle_post_update_state(state: &AppState, body: &[u8]) -> (u16, String) {
+    let mut checked_at: Option<u64> = None;
+    let mut latest_ver: Option<String> = None;
+    let mut ok = true;
+
+    let parsed = parse_json_object_entries(body, |k, v| {
+        let mut idx = 0;
+        skip_ws(v, &mut idx);
+        match k.as_str() {
+            "checked_at" => {
+                if let Some(ts) = parse_u64(v, &mut idx) {
+                    checked_at = Some(ts);
+                } else {
+                    ok = false;
+                }
+            }
+            "latest_version" if v.first() == Some(&b'"') => {
+                if let Some(s) = parse_string(v, &mut idx) {
+                    if s.trim().is_empty() {
+                        latest_ver = Some(String::new());
+                    } else if let Some(norm) = normalize_semver(&s) {
+                        latest_ver = Some(norm);
+                    } else {
+                        ok = false;
+                    }
+                } else {
+                    ok = false;
+                }
+            }
+            _ => {}
+        }
+    });
+
+    if parsed.is_none() || !ok {
+        return (400, r#"{"error":"Invalid update state payload"}"#.to_string());
+    }
+
+    let Ok(mut store) = state.settings.lock() else {
+        return (500, r#"{"error":"Internal lock error"}"#.to_string());
+    };
+
+    let max_now = unix_now_secs().saturating_add(60);
+    if let Some(ts) = checked_at {
+        store.update_checked_at = ts.min(max_now);
+    } else {
+        store.update_checked_at = unix_now_secs();
+    }
+    if let Some(ver) = latest_ver {
+        store.latest_version = ver;
+    }
+
+    if let Err(e) = save_settings_store(&store) {
+        return (
+            500,
+            format!(
+                r#"{{"error":"Failed to save update state: {}"}}"#,
+                json_escape(&e.to_string())
+            ),
+        );
+    }
+
+    (
+        200,
+        format!(
+            r#"{{"ok":true,"checked_at":{},"latest_version":"{}"}}"#,
+            store.update_checked_at,
+            json_escape(&store.latest_version)
+        ),
+    )
 }
 
 fn note_path_for(notes_dir: &Path, conv: &str) -> Option<PathBuf> {
@@ -2162,7 +2328,8 @@ fn parse_quota_bucket(obj: &[u8]) -> Option<(QuotaBucketInfo, String)> {
         return None;
     }
     let f = frac.unwrap_or(0.0).clamp(0.0, 1.0);
-    let pct = (f * 100.0).round().clamp(0.0, 100.0) as u8;
+    let raw_pct = (f * 100.0).round().clamp(0.0, 100.0) as u8;
+    let pct = if f > 0.0 && raw_pct == 0 { 1 } else { raw_pct };
     Some((
         QuotaBucketInfo {
             label,
@@ -2306,7 +2473,7 @@ fn handle_get_quota(state: &AppState, force: bool) -> String {
         let fresh = if force {
             guard
                 .last_force_at
-                .is_some_and(|ts| ts.elapsed() < Duration::from_secs(3))
+                .is_some_and(|ts| ts.elapsed() < Duration::from_millis(800))
         } else if let Some(ts) = guard.fetched_at {
             let max_age = if guard.ok {
                 Duration::from_secs(8)
@@ -2891,6 +3058,13 @@ fn handle_get_search(
         let (msg_results, msg_total) =
             search_all_transcripts(&state.app_data, conv, q_trimmed, &cutoffs, &titles, cancel);
         note_results.extend(msg_results);
+        note_results.sort_by(|a, b| {
+            a.rank
+                .cmp(&b.rank)
+                .then_with(|| (a.role != "note").cmp(&(b.role != "note")))
+                .then_with(|| b.created_at.cmp(&a.created_at))
+                .then_with(|| b.step_index.cmp(&a.step_index))
+        });
         if note_results.len() > MAX_SEARCH_RESULTS {
             note_results.truncate(MAX_SEARCH_RESULTS);
         }
@@ -2917,7 +3091,7 @@ fn handle_get_search(
             out.push(',');
         }
         out.push_str(&format!(
-            r#"{{"conv_id":"{}","chat_title":"{}","is_current":{},"chat_archived":{},"step_index":{},"role":"{}","created_at":"{}","archived":{},"snippet":"{}","text":"{}"}}"#,
+            r#"{{"conv_id":"{}","chat_title":"{}","is_current":{},"chat_archived":{},"step_index":{},"role":"{}","created_at":"{}","archived":{},"rank":{},"snippet":"{}","text":"{}"}}"#,
             json_escape(&r.conv_id),
             json_escape(&r.chat_title),
             r.is_current,
@@ -2926,6 +3100,7 @@ fn handle_get_search(
             r.role,
             json_escape(&r.created_at),
             r.archived,
+            r.rank,
             json_escape(&r.snippet),
             json_escape(&r.text),
         ));
@@ -3726,7 +3901,7 @@ fn apply_step_to_scan(pending: &mut ChatScanState, m: &StepMetrics) {
         pending.has_delta = true;
         pending.just_compressed = false;
     } else {
-        if failed {
+        if failed || m.kind == StepKind::ErrorMessage {
             pending.compact_in_flight = false;
         }
         if is_model_reply {
@@ -4196,6 +4371,17 @@ fn parse_settings_store_data(b: &[u8]) -> Option<LoadedStoreData> {
                     }
                 }
             });
+        } else if key == "update" && val_slice.first() == Some(&b'{') {
+            seen_known = true;
+            let max_now = unix_now_secs().saturating_add(60);
+            data.update_checked_at = parse_json_u64_field(val_slice, "checked_at")
+                .unwrap_or(0)
+                .min(max_now);
+            if let Some(ver) = parse_json_string_field(val_slice, "latest_version") {
+                if let Some(norm) = normalize_semver(&ver) {
+                    data.latest_version = norm;
+                }
+            }
         }
     })?;
 
@@ -4789,6 +4975,8 @@ mod tests {
                 has_pending_draft: false,
                 cutoffs: HashMap::new(),
                 cutoff_order: Vec::new(),
+                update_checked_at: 0,
+                latest_version: String::new(),
                 rev: 1,
                 path: dir.join("settings.json"),
             })),
@@ -4864,6 +5052,8 @@ mod tests {
                 has_pending_draft: false,
                 cutoffs: HashMap::new(),
                 cutoff_order: Vec::new(),
+                update_checked_at: 0,
+                latest_version: String::new(),
                 rev: 1,
                 path: dir.join("settings.json"),
             })),
@@ -5032,15 +5222,60 @@ mod tests {
         fs::create_dir_all(&n_dir).unwrap();
         fs::write(
             n_dir.join(format!("{conv_c}.json")),
-            r#"{"draft":"","next_id":2,"cards":[{"id":1,"text":"Remember release checklist for Linux","pinned":true}]}"#,
+            r#"{"draft":"","next_id":3,"cards":[{"id":1,"text":"Remember release checklist for Linux","pinned":true},{"id":2,"text":"release notes scattered far away from archive word here: archive","pinned":false}]}"#,
         )
         .unwrap();
         let (note_res, note_total) = search_all_notes(&n_dir, &dir, conv_b, "release", &titles, None);
-        assert_eq!(note_total, 1);
+        assert_eq!(note_total, 2);
         assert_eq!(note_res[0].role, "note");
         assert_eq!(note_res[0].conv_id, conv_c);
         assert!(note_res[0].chat_archived);
         assert_eq!(note_res[0].chat_title, "Archived release notes");
+
+        // Verify unified ranking: exact phrase in chat (rank 0) beats scattered note (rank 2)
+        let state = AppState {
+            app_data: dir.clone(),
+            notes_dir: n_dir.clone(),
+            token: None,
+            default_conv: None,
+            ls_address: None,
+            csrf_token: None,
+            preload_js: String::new(),
+            settings: Arc::new(Mutex::new(SettingsStore {
+                chats: HashMap::new(),
+                chat_order: Vec::new(),
+                draft: Settings::default(),
+                draft_updated_at: 0,
+                has_pending_draft: false,
+                cutoffs: HashMap::new(),
+                cutoff_order: Vec::new(),
+                update_checked_at: 0,
+                latest_version: String::new(),
+                rev: 1,
+                path: dir.join("settings.json"),
+            })),
+            notes_lock: Arc::new(Mutex::new(())),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            scans: Arc::new(Mutex::new(HashMap::new())),
+            chat_titles: Arc::new(Mutex::new((unix_now_secs(), titles.clone()))),
+            ls_live: Arc::new(Mutex::new(LsLiveCache::default())),
+            quota_cache: Arc::new(Mutex::new(QuotaCache::default())),
+            last_prune_at: Arc::new(Mutex::new(None)),
+            search_gen: Arc::new(AtomicUsize::new(0)),
+            done_sound_mp3: Arc::new(OnceLock::new()),
+            active_conns: Arc::new(AtomicUsize::new(0)),
+        };
+        let filler = " padding".repeat(35);
+        fs::write(
+            n_dir.join(format!("{conv_c}.json")),
+            format!(r#"{{"draft":"","next_id":2,"cards":[{{"id":1,"text":"release {filler} archive","pinned":true}}]}}"#),
+        )
+        .unwrap();
+        let (st_code, merged_json) = handle_get_search(&state, conv_b, "release archive", "all");
+        assert_eq!(st_code, 200);
+        let first_role_pos = merged_json.find(r#""role":"user""#).unwrap();
+        let note_role_pos = merged_json.find(r#""role":"note""#).unwrap();
+        assert!(first_role_pos < note_role_pos);
 
         let _ = fs::remove_dir_all(&dir);
     }
@@ -5129,13 +5364,13 @@ mod tests {
                         "displayName": "Gemini Models",
                         "buckets": [
                             {"displayName": "Weekly limit", "remainingFraction": 0.82, "resetTime": "2026-11-30T12:00:00Z"},
-                            {"displayName": "5h limit", "remainingFraction": 0.934, "resetTime": "2026-11-24T23:40:00Z"}
+                            {"displayName": "5h limit", "remainingFraction": 0.003, "resetTime": "2026-11-24T23:40:00Z"}
                         ]
                     },
                     {
                         "displayName": "Claude and GPT models",
                         "buckets": [
-                            {"displayName": "Weekly limit", "remainingFraction": 0.70, "resetTime": "2026-11-25T10:00:00Z"},
+                            {"displayName": "Weekly limit", "remainingFraction": 0.0, "resetTime": "2026-11-25T10:00:00Z"},
                             {"displayName": "5h limit", "remainingFraction": 1, "resetTime": ""}
                         ]
                     }
@@ -5146,13 +5381,15 @@ mod tests {
         assert!(parsed.has_any());
         let g = parsed.gemini.as_ref().unwrap();
         assert_eq!(g.weekly.as_ref().unwrap().pct, 82);
-        assert_eq!(g.five_hour.as_ref().unwrap().pct, 93);
+        assert_eq!(g.five_hour.as_ref().unwrap().pct, 1);
         let o = parsed.other.as_ref().unwrap();
-        assert_eq!(o.weekly.as_ref().unwrap().pct, 70);
+        assert_eq!(o.weekly.as_ref().unwrap().pct, 0);
         assert_eq!(o.five_hour.as_ref().unwrap().pct, 100);
         let json = parsed.to_json();
         assert!(json.contains(r#""available":true"#));
         assert!(json.contains(r#""pct":82"#));
+        assert!(json.contains(r#""pct":1"#));
+        assert!(json.contains(r#""pct":0"#));
         assert!(json.contains(r#""pct":100"#));
 
         let empty = parse_quota_summary_json(br#"{"response":{}}"#);
@@ -5201,6 +5438,8 @@ mod tests {
                 has_pending_draft: false,
                 cutoffs: HashMap::new(),
                 cutoff_order: Vec::new(),
+                update_checked_at: 0,
+                latest_version: String::new(),
                 rev: 1,
                 path: dir.join("settings.json"),
             })),
@@ -5231,6 +5470,65 @@ mod tests {
         assert!(store.chats.contains_key(archived_id));
         assert!(!store.chats.contains_key(deleted_id));
         drop(store);
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn update_state_persists_valid_semver_and_clamps_future_timestamp() {
+        let mut dir = env::temp_dir();
+        dir.push(format!("antimetro_test_upd_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let state = AppState {
+            app_data: dir.clone(),
+            notes_dir: dir.join("notes"),
+            token: None,
+            default_conv: None,
+            ls_address: None,
+            csrf_token: None,
+            preload_js: String::new(),
+            settings: Arc::new(Mutex::new(SettingsStore {
+                chats: HashMap::new(),
+                chat_order: Vec::new(),
+                draft: Settings::default(),
+                draft_updated_at: 0,
+                has_pending_draft: false,
+                cutoffs: HashMap::new(),
+                cutoff_order: Vec::new(),
+                update_checked_at: 0,
+                latest_version: String::new(),
+                rev: 1,
+                path: dir.join("settings.json"),
+            })),
+            notes_lock: Arc::new(Mutex::new(())),
+            cache: Arc::new(Mutex::new(HashMap::new())),
+            scans: Arc::new(Mutex::new(HashMap::new())),
+            chat_titles: Arc::new(Mutex::new((0, HashMap::new()))),
+            ls_live: Arc::new(Mutex::new(LsLiveCache::default())),
+            quota_cache: Arc::new(Mutex::new(QuotaCache::default())),
+            last_prune_at: Arc::new(Mutex::new(None)),
+            search_gen: Arc::new(AtomicUsize::new(0)),
+            done_sound_mp3: Arc::new(OnceLock::new()),
+            active_conns: Arc::new(AtomicUsize::new(0)),
+        };
+
+        let (bad_st, _) = handle_post_update_state(
+            &state,
+            br#"{"checked_at":1700000000,"latest_version":"javascript:alert(1)"}"#,
+        );
+        assert_eq!(bad_st, 400);
+
+        let (ok_st, _) = handle_post_update_state(
+            &state,
+            br#"{"checked_at":999999999999,"latest_version":"v1.5.2"}"#,
+        );
+        assert_eq!(ok_st, 200);
+
+        let loaded = load_settings_store_data(&dir.join("settings.json"));
+        assert_eq!(loaded.latest_version, "1.5.2");
+        assert!(loaded.update_checked_at > 0 && loaded.update_checked_at <= unix_now_secs() + 60);
 
         let _ = fs::remove_dir_all(&dir);
     }

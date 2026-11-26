@@ -4,6 +4,34 @@ Track new features, improvements, and bug fixes in **Antimetro** for Google Anti
 
 ---
 
+## v1.4.0
+
+**November 26, 2026**
+
+### 1-Click Jump to Chat from Search, Update Notifications, Color & Quota Refinement, and Notes Polish
+
+This release turns cross-chat **Search** into an instant conversation navigator, adds a lightweight once-a-day update indicator on **About**, refines the amber warning palette, button proportions, and live quota refresh timing, and eliminates **Notes** header focus flicker, layout shifts, and stuck compaction states on quota errors. It includes **6 improvements** and **6 fixes**.
+
+### Improvements (6)
+
+- **1-click conversation jump in Search:** Clicking any conversation title (`↗`) in global **Search** (`All`) now opens that conversation directly in Antigravity while keeping the Antimetro side panel open alongside it.
+- **Quiet daily update indicator:** Antimetro now checks GitHub Releases at most once every 24 hours (with zero user data sent and local state persisted across restarts), displaying a subtle blue accent dot on **About** (with a gentle double pulse once per minute) and a direct download link inside the popover whenever a newer release is available.
+- **Refined About drawer & unified `28px` button proportions:** Added smooth slide-open / slide-close animation to **About**, added a dedicated **Feedback** button linking straight to GitHub Issues alongside **GitHub** and a full-width **♥ Support / Donate** button, added destination URL tooltips on hover for all external links, and unified all action buttons (`Compact now`, `Undo`, `About`, and `About` links) to a crisp `28px` height matching the Auto-compact threshold input.
+- **Cleaner warm amber-orange indicator color:** Tuned `--am-warn1` in both light (`#ea680c`) and dark (`#fb8c24`) themes and unified progress bar saturation with the quota rings for crisp contrast without muddy yellow-brown tones.
+- **Faster post-turn quota refresh (`1s`):** Reduced the post-turn quota refresh delay from `2s` to `1s` (with an `800ms` server deduplication window) so final session quota rings settle faster right after a reply finishes.
+- **Antigravity 2.35.2 compatibility & manifest sync:** Updated compatibility metadata for **Antigravity App 2.0 (v2.35.2)** and refreshed `plugin.json` / `sidecar.json` descriptions across all installers.
+
+### Fixes (6)
+
+- **Fixed `Compact now` button getting stuck on `Working...` after a quota or model error:** When `/compact` fails immediately (e.g., quota exhausted), the button now resets cleanly back to `Compact now` as soon as the conversation returns to idle (or on the pending timeout), and `ERROR_MESSAGE` transcript steps now explicitly clear `compact_in_flight`.
+- **Eliminated Copy icon & border flicker in Notes:** Prevented card header action buttons (`Pin`, `Copy`, `Delete`, `Confirm`, `Cancel`) from stealing or briefly triggering focus, tying `Copy` visibility and the active card border strictly to active text editing (including across animated `Pin` reordering).
+- **Fixed horizontal layout shift when opening About:** Hidden the root document scrollbar while preserving wheel scrolling on shorter viewports so opening **About** never narrows cards or shifts the right margin.
+- **Fixed missed mid-turn quota updates inside the 15s throttle window:** Token increases occurring during the 15-second cooldown now schedule a deferred refresh at the end of the window (and track brand-new chat creation on the first step) instead of dropping the update until a later step.
+- **Unified Notes & messages ranking in global Search:** Combined note matches and transcript matches now sort together by match quality tier (`exact phrase` → `close window` → `scattered terms`) so scattered words in a note never outrank an exact phrase match in a conversation.
+- **Accurate `1%` floor for non-zero quota:** Remaining quota fractions below `0.5%` (e.g. `0.3%`) now display `1%` instead of rounding down to `0%`, reserving `0%` strictly for fully exhausted buckets.
+
+---
+
 ## v1.3.0
 
 **November 25, 2026**

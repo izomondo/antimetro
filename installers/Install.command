@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "==================================================="
-echo "  Installing Antimetro v1.3.0 for Antigravity 2.0"
+echo "  Installing Antimetro v1.4.0 for Antigravity 2.0"
 echo "==================================================="
 echo ""
 
@@ -33,8 +33,8 @@ cat > "${PLUGIN_DIR}/plugin.json" <<'EOF'
 {
   "name": "antimetro",
   "displayName": "Antimetro",
-  "version": "1.3.0",
-  "description": "Live context token meter, smart auto-compact, per-chat notes, and full transcript search for Antigravity App 2.0.",
+  "version": "1.4.0",
+  "description": "Live context token meter, model quota rings, smart auto-compact, per-chat notes, and instant cross-chat search for Antigravity App 2.0.",
   "logo": "assets/logo.svg",
   "author": {
     "name": "izomondo",
@@ -52,7 +52,7 @@ cat > "${SIDECAR_DIR}/sidecar.json" <<EOF
   "env": {},
   "restart_policy": "always",
   "display_name": "Antimetro",
-  "description": "Live context token meter, smart auto-compact, per-chat notes, and full transcript search.",
+  "description": "Live context token meter, model quota rings, smart auto-compact, per-chat notes, and instant cross-chat search.",
   "has_web_ui": true,
   "agent_permissions": {
     "allows_user_interactions": false
@@ -70,9 +70,10 @@ cat > "${SIDECAR_DIR}/sidecar.json" <<EOF
 }
 EOF
 
-echo "[OK] Antimetro v1.3.0 has been installed!"
+echo "[OK] Antimetro v1.4.0 has been installed!"
 echo ""
-echo "Please fully restart Antigravity and open Antimetro in the right Side Panel."
+echo "First-time install: fully restart Antigravity and open Antimetro in the right Side Panel."
+echo "Updating an existing install: just reopen the Antimetro tab."
 echo ""
 if [ -t 0 ]; then
   read -r -p "Press Enter to close..."
