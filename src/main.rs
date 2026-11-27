@@ -184,6 +184,7 @@ struct ChatScanSummary {
     is_busy: bool,
     has_bg_work: bool,
     turn_finished: bool,
+    active_quota_group: ModelGroup,
 }
 
 #[derive(Default, Clone)]
@@ -211,6 +212,7 @@ struct ChatScanState {
     just_compressed: bool,
     is_busy: bool,
     turn_finished: bool,
+    active_quota_group: ModelGroup,
 }
 
 impl ChatScanState {
@@ -234,6 +236,7 @@ impl ChatScanState {
             is_busy: self.is_busy || has_bg_work,
             has_bg_work,
             turn_finished: self.turn_finished && !has_bg_work,
+            active_quota_group: self.active_quota_group,
         }
     }
 }
@@ -268,6 +271,40 @@ impl StepKind {
             "GENERIC" => Self::Generic,
             "ERROR_MESSAGE" => Self::ErrorMessage,
             _ => Self::Other,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+enum ModelGroup {
+    #[default]
+    None,
+    Gemini,
+    Other,
+}
+
+impl ModelGroup {
+    fn from_model_name(s: &str) -> Self {
+        let lower = s.trim().to_ascii_lowercase();
+        if lower.is_empty() {
+            return Self::None;
+        }
+        if lower.contains("gemini")
+            || lower == "flash"
+            || lower.starts_with("flash-")
+            || lower.starts_with("flash_")
+        {
+            Self::Gemini
+        } else {
+            Self::Other
+        }
+    }
+
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "",
+            Self::Gemini => "gemini",
+            Self::Other => "other",
         }
     }
 }
@@ -341,6 +378,7 @@ struct StepMetrics {
     step_index: u64,
     kind: StepKind,
     status: StepStatus,
+    model_group: ModelGroup,
     created_at: String,
     input_tokens: u64,
     cache_read_tokens: u64,
@@ -3954,6 +3992,10 @@ fn apply_step_to_scan(pending: &mut ChatScanState, m: &StepMetrics) {
         }
     }
 
+    if m.model_group != ModelGroup::None {
+        pending.active_quota_group = m.model_group;
+    }
+
     if !m.created_at.is_empty() {
         if pending.first_message_at.is_empty() && (is_user || is_model_reply) {
             pending.first_message_at = m.created_at.clone();
@@ -4088,7 +4130,7 @@ fn format_scan_json(etag: &str, settings_json: &str, scan: &ChatScanSummary) -> 
     };
 
     format!(
-        r#"{{"status":"ok","etag":"{}","context_tokens":{},"step_index":{},"message_count":{},"user_messages":{},"model_messages":{},"checkpoint_count":{},"last_checkpoint_step":{},"undo_step_index":{},"compact_in_flight":{},"first_message_at":"{}","last_message_at":"{}","has_delta":{},"delta_tokens":{},"just_compressed":{},"is_busy":{},"has_bg_work":{},"turn_finished":{},"settings":{}}}"#,
+        r#"{{"status":"ok","etag":"{}","context_tokens":{},"step_index":{},"message_count":{},"user_messages":{},"model_messages":{},"checkpoint_count":{},"last_checkpoint_step":{},"undo_step_index":{},"compact_in_flight":{},"first_message_at":"{}","last_message_at":"{}","has_delta":{},"delta_tokens":{},"just_compressed":{},"is_busy":{},"has_bg_work":{},"turn_finished":{},"active_quota_group":"{}","settings":{}}}"#,
         json_escape(etag),
         scan.context_tokens,
         scan.latest_step_index,
@@ -4107,6 +4149,7 @@ fn format_scan_json(etag: &str, settings_json: &str, scan: &ChatScanSummary) -> 
         scan.is_busy,
         scan.has_bg_work,
         scan.turn_finished,
+        scan.active_quota_group.as_str(),
         settings_json,
     )
 }
@@ -4210,6 +4253,11 @@ fn parse_line(b: &[u8]) -> Option<StepMetrics> {
             "status" if val_slice.first() == Some(&b'"') => {
                 if let Some(s) = parse_string(val_slice, &mut idx) {
                     m.status = StepStatus::from_str(&s);
+                }
+            }
+            "model" if val_slice.first() == Some(&b'"') => {
+                if let Some(s) = parse_string(val_slice, &mut idx) {
+                    m.model_group = ModelGroup::from_model_name(&s);
                 }
             }
             "created_at" if val_slice.first() == Some(&b'"') => {
@@ -5531,5 +5579,18 @@ mod tests {
         assert!(loaded.update_checked_at > 0 && loaded.update_checked_at <= unix_now_secs() + 60);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn model_group_classifies_gemini_and_other_models() {
+        assert_eq!(ModelGroup::from_model_name(""), ModelGroup::None);
+        assert_eq!(ModelGroup::from_model_name("gemini-4-neon-medium"), ModelGroup::Gemini);
+        assert_eq!(ModelGroup::from_model_name("flash"), ModelGroup::Gemini);
+        assert_eq!(ModelGroup::from_model_name("claude-opus-5-5-medium"), ModelGroup::Other);
+        assert_eq!(ModelGroup::from_model_name("gpt-oss-120b-medium"), ModelGroup::Other);
+
+        let line = br#"{"step_index":3,"type":"PLANNER_RESPONSE","status":"DONE","model":"gemini-4-neon-medium","input_tokens":1000,"cache_read_tokens":500}"#;
+        let parsed = parse_line(line).expect("parse_line");
+        assert_eq!(parsed.model_group, ModelGroup::Gemini);
     }
 }

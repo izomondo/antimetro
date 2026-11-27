@@ -1,9 +1,9 @@
 @echo off
 setlocal
-title Antimetro v1.4.0 Installer
+title Antimetro v1.4.1 Installer
 
 echo ===================================================
-echo   Installing Antimetro v1.4.0 for Antigravity 2.0
+echo   Installing Antimetro v1.4.1 for Antigravity 2.0
 echo ===================================================
 echo.
 
@@ -44,12 +44,12 @@ powershell -NoProfile -Command ^
   "$u = New-Object System.Text.UTF8Encoding($false);" ^
   "$pDir = $env:PLUGIN_DIR; $sDir = $env:SIDECAR_DIR;" ^
   "$exe = $env:EXE_DST.Replace('\','\\').Replace('\"','\\\"');" ^
-  "$pJson = '{\"name\":\"antimetro\",\"displayName\":\"Antimetro\",\"version\":\"1.4.0\",\"description\":\"Live context token meter, model quota rings, smart auto-compact, per-chat notes, and instant cross-chat search for Antigravity App 2.0.\",\"logo\":\"assets/logo.svg\",\"author\":{\"name\":\"izomondo\",\"url\":\"https://izomondo.com\"},\"homepage\":\"https://izomondo.com\",\"repository\":\"https://github.com/izomondo/antimetro\"}';" ^
+  "$pJson = '{\"name\":\"antimetro\",\"displayName\":\"Antimetro\",\"version\":\"1.4.1\",\"description\":\"Live context token meter, model quota rings, smart auto-compact, per-chat notes, and instant cross-chat search for Antigravity App 2.0.\",\"logo\":\"assets/logo.svg\",\"author\":{\"name\":\"izomondo\",\"url\":\"https://izomondo.com\"},\"homepage\":\"https://izomondo.com\",\"repository\":\"https://github.com/izomondo/antimetro\"}';" ^
   "$sJson = '{\"command\":\"' + $exe + '\",\"args\":[],\"env\":{},\"restart_policy\":\"always\",\"display_name\":\"Antimetro\",\"description\":\"Live context token meter, model quota rings, smart auto-compact, per-chat notes, and instant cross-chat search.\",\"has_web_ui\":true,\"agent_permissions\":{\"allows_user_interactions\":false},\"ui_config\":{\"display_name\":\"Antimetro\",\"views\":[{\"path\":\"/\",\"entrypoint\":\"SIDECAR_UI_ENTRYPOINT_AUX_PANE\",\"title\":\"Antimetro\"}]}}';" ^
   "[System.IO.File]::WriteAllText((Join-Path $pDir 'plugin.json'), $pJson, $u);" ^
   "[System.IO.File]::WriteAllText((Join-Path $sDir 'sidecar.json'), $sJson, $u);"
 
-echo [OK] Antimetro v1.4.0 has been installed!
+echo [OK] Antimetro v1.4.1 has been installed!
 echo.
 echo First-time install: fully restart Antigravity (including the tray icon)
 echo and open Antimetro in the right Side Panel.

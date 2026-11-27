@@ -4,6 +4,26 @@ Track new features, improvements, and bug fixes in **Antimetro** for Google Anti
 
 ---
 
+## v1.4.1
+
+**November 27, 2026**
+
+### Instant Cross-Chat Quota Sync, Idle Reset Auto-Refresh, Active Model Highlight, and Cleaner Card Ergonomics
+
+This maintenance release keeps model quota rings instantaneously synchronized across all open chats, automatically refreshes expired quota buckets even while idle, subtly highlights which quota pool (`Gemini` or `Other`) the active chat is using, and removes visual tooltip clutter from self-explanatory card icons. It includes **2 improvements** and **2 fixes**.
+
+### Improvements (2)
+
+- **Active quota pool highlight:** The **Gemini** or **Other** label above the quota rings now subtly highlights to match the model family currently responding in the open conversation, so you can tell at a glance which quota pool your active chat draws from.
+- **Quieter Notes & Search cards:** Removed redundant hover tooltips on self-explanatory card header icons (`Pin`, `Copy`, `Delete`, `Confirm`, `Cancel`) while keeping `aria-label` accessibility and keeping helpful tooltips everywhere they add information (quota reset countdowns, `Undo`, search scope, Auto-compact handle, and `About` link URLs).
+
+### Fixes (2)
+
+- **Instant quota sync across all open chats:** Quota updates are now broadcast immediately across all open Antimetro side-panel tabs via `BroadcastChannel` (with zero extra network calls) and refreshed from the local in-memory cache on conversation switch and window focus, eliminating stale quota numbers when switching between chats.
+- **Idle quota reset auto-refresh & `1.5s` post-turn settle:** When any visible quota bucket's `reset_time` passes while Antigravity is idle, the 60-second background check now triggers a single `forceRefresh` so the ring resets to `100%` automatically without needing to send a prompt; adjusted post-turn refresh delay from `1s` to `1.5s` so server-side quota accounting settles reliably before the final read.
+
+---
+
 ## v1.4.0
 
 **November 26, 2026**

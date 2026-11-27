@@ -350,6 +350,10 @@
     line-height: 1.2;
     text-align: center;
     white-space: nowrap;
+    transition: color 0.25s ease;
+  }
+  .quota-group.is-active-group .quota-name {
+    color: var(--am-fg);
   }
   .quota-rows {
     display: flex;
@@ -1650,7 +1654,7 @@
       <div class="about-collapsible-inner">
         <div class="about-card-box">
           <div class="about-head">
-            <span class="about-title">Antimetro v1.4.0</span>
+            <span class="about-title">Antimetro v1.4.1</span>
             <span class="about-author">by izomondo</span>
           </div>
           <div class="about-compat">Tested on Antigravity 2.35.2</div>
@@ -1743,7 +1747,7 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const params = new URLSearchParams(location.search);
-  const APP_VERSION = "1.4.0";
+  const APP_VERSION = "1.4.1";
   const UPDATE_CHECK_INTERVAL_SEC = 86400;
   const GITHUB_LATEST_API = "https://api.github.com/repos/izomondo/antimetro/releases/latest";
   const GITHUB_RELEASES_URL = "https://github.com/izomondo/antimetro/releases/latest";
@@ -1769,6 +1773,9 @@
       auto_compact_threshold: 250000,
     },
     lastData: null,
+    lastQuota: null,
+    lastExpiredResetForceKey: "",
+    lastExpiredResetForceAt: 0,
     wasBusy: false,
     quotaTimer: null,
     quotaActiveTimer: null,
@@ -3509,7 +3516,6 @@
     copyBtn.type = "button";
     copyBtn.className = "notes-action copy-btn";
     copyBtn.tabIndex = -1;
-    setTip(copyBtn, "Copy card");
     copyBtn.setAttribute("aria-label", "Copy card");
     copyBtn.innerHTML = ICON_COPY;
     copyBtn.disabled = !card.text;
@@ -3529,7 +3535,6 @@
     pinBtn.type = "button";
     pinBtn.className = "notes-action pin-btn" + (card.pinned ? " is-pinned" : "");
     const pinLabel = card.pinned ? "Unpin card" : "Pin to top";
-    setTip(pinBtn, pinLabel);
     pinBtn.setAttribute("aria-label", pinLabel);
     pinBtn.setAttribute("aria-pressed", card.pinned ? "true" : "false");
     pinBtn.innerHTML = ICON_PIN;
@@ -3551,7 +3556,6 @@
     const trashBtn = document.createElement("button");
     trashBtn.type = "button";
     trashBtn.className = "notes-action del-trash-btn";
-    setTip(trashBtn, "Delete card");
     trashBtn.setAttribute("aria-label", "Delete card");
     trashBtn.innerHTML = ICON_TRASH;
 
@@ -3561,14 +3565,12 @@
     const okBtn = document.createElement("button");
     okBtn.type = "button";
     okBtn.className = "notes-action confirm-ok";
-    setTip(okBtn, "Confirm delete");
     okBtn.setAttribute("aria-label", "Confirm delete");
     okBtn.innerHTML = ICON_CHECK;
 
     const cancelBtn = document.createElement("button");
     cancelBtn.type = "button";
     cancelBtn.className = "notes-action confirm-cancel";
-    setTip(cancelBtn, "Cancel");
     cancelBtn.setAttribute("aria-label", "Cancel");
     cancelBtn.innerHTML = ICON_X;
 
@@ -3672,7 +3674,6 @@
         pinBtn.disabled = true;
         pinBtn.classList.remove("is-pinned");
         pinBtn.setAttribute("aria-pressed", "false");
-        setTip(pinBtn, "Pin to top");
         pinBtn.setAttribute("aria-label", "Pin to top");
         if (state.notes.timer) {
           clearTimeout(state.notes.timer);
@@ -3906,7 +3907,6 @@
         targetEl.classList.toggle("pinned", card.pinned);
         if (pinBtn) {
           pinBtn.classList.toggle("is-pinned", card.pinned);
-          setTip(pinBtn, pinLabel);
           pinBtn.setAttribute("aria-label", pinLabel);
           pinBtn.setAttribute("aria-pressed", card.pinned ? "true" : "false");
         }
@@ -4549,7 +4549,6 @@
       const copyBtn = document.createElement("button");
       copyBtn.type = "button";
       copyBtn.className = "notes-action";
-      setTip(copyBtn, r.role === "note" ? "Copy note" : "Copy full message");
       copyBtn.setAttribute("aria-label", r.role === "note" ? "Copy note" : "Copy full message");
       copyBtn.innerHTML = ICON_COPY;
       copyBtn.addEventListener("click", async (e) => {
@@ -5153,6 +5152,53 @@
     }
   }
 
+  const quotaChannel = (() => {
+    try {
+      return typeof BroadcastChannel === "function" ? new BroadcastChannel("antimetro-quota") : null;
+    } catch (_) {
+      return null;
+    }
+  })();
+
+  if (quotaChannel) {
+    quotaChannel.onmessage = (ev) => {
+      const q = ev && ev.data;
+      if (q && typeof q === "object") {
+        state.lastQuota = q;
+        renderQuota(q);
+      }
+    };
+  }
+
+  function applyActiveQuotaGroup(group) {
+    const gEl = $("quota-gemini");
+    const oEl = $("quota-other");
+    if (gEl) gEl.classList.toggle("is-active-group", group === "gemini");
+    if (oEl) oEl.classList.toggle("is-active-group", group === "other");
+  }
+
+  function expiredQuotaResetKey(q) {
+    if (!q || !q.available) return "";
+    const now = Date.now();
+    const expired = [];
+    const buckets = [
+      q.gemini && q.gemini.weekly,
+      q.gemini && q.gemini.five_hour,
+      q.other && q.other.weekly,
+      q.other && q.other.five_hour,
+    ];
+    for (const b of buckets) {
+      if (!b || !b.reset_time) continue;
+      const pct = Math.round(Number(b.pct) || 0);
+      if (pct >= 100) continue;
+      const ts = Date.parse(b.reset_time);
+      if (Number.isFinite(ts) && ts <= now) {
+        expired.push(b.reset_time);
+      }
+    }
+    return expired.join("|");
+  }
+
   function triggerForceQuotaNow() {
     if (state.quotaActiveTimer) {
       clearTimeout(state.quotaActiveTimer);
@@ -5170,7 +5216,13 @@
       const res = await apiFetch(url, { method: "GET" });
       if (!res.ok) return;
       const data = await res.json();
+      state.lastQuota = data;
       renderQuota(data);
+      if (quotaChannel && data && data.available) {
+        try {
+          quotaChannel.postMessage(data);
+        } catch (_) {}
+      }
     } catch (_) {
     }
   }
@@ -5180,7 +5232,19 @@
     state.quotaTimer = setTimeout(async () => {
       state.quotaTimer = null;
       if (!document.hidden) {
-        await fetchQuota(false);
+        const expKey = expiredQuotaResetKey(state.lastQuota);
+        const now = Date.now();
+        const needForceReset =
+          Boolean(expKey) &&
+          (expKey !== state.lastExpiredResetForceKey || (now - state.lastExpiredResetForceAt) >= 300000);
+        if (needForceReset) {
+          state.lastExpiredResetForceKey = expKey;
+          state.lastExpiredResetForceAt = now;
+          state.lastQuotaForceAt = now;
+          await fetchQuota(true);
+        } else {
+          await fetchQuota(false);
+        }
       }
       scheduleQuotaLoop();
     }, 60000);
@@ -5223,9 +5287,11 @@
 
     if (isConvSwitch) {
       clearUndoDone();
+      fetchQuota(false);
     }
 
     if (d.status !== "ok") {
+      applyActiveQuotaGroup("");
       clearCompactPending();
       stopWorkingCompactBtn();
       syncBarFlow(false, false);
@@ -5272,6 +5338,8 @@
       stopWorkingCompactBtn();
       setCompactBtnStatus();
     }
+
+    applyActiveQuotaGroup(d.active_quota_group || "");
 
     const tokens = d.context_tokens || 0;
     const deltaTokens = d.delta_tokens || 0;
@@ -5349,7 +5417,7 @@
       state.quotaAfterTurnTimer = setTimeout(() => {
         state.quotaAfterTurnTimer = null;
         triggerForceQuotaNow();
-      }, 1000);
+      }, 1500);
     }
     state.wasBusy = nowBusy;
 
@@ -5400,6 +5468,9 @@
     }
   }
 
+  window.addEventListener("focus", () => {
+    fetchQuota(false);
+  });
   window.addEventListener("blur", () => {
     hideTip(true);
     closeCtxMenu();

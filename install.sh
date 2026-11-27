@@ -7,7 +7,7 @@ SIDECAR_DIR="${PLUGIN_DIR}/sidecars/antimetro"
 ASSETS_DIR="${PLUGIN_DIR}/assets"
 BIN_DST="${SIDECAR_DIR}/antimetro"
 
-echo "1/3 Building Antimetro v1.4.0 (Rust release)..."
+echo "1/3 Building Antimetro v1.4.1 (Rust release)..."
 cd "${ROOT_DIR}"
 cargo build --release
 
@@ -26,7 +26,7 @@ cat > "${PLUGIN_DIR}/plugin.json" <<'EOF'
 {
   "name": "antimetro",
   "displayName": "Antimetro",
-  "version": "1.4.0",
+  "version": "1.4.1",
   "description": "Live context token meter, model quota rings, smart auto-compact, per-chat notes, and instant cross-chat search for Antigravity App 2.0.",
   "logo": "assets/logo.svg",
   "author": {
@@ -63,5 +63,5 @@ cat > "${SIDECAR_DIR}/sidecar.json" <<EOF
 }
 EOF
 
-echo "3/3 DONE! Antimetro v1.4.0 installed."
+echo "3/3 DONE! Antimetro v1.4.1 installed."
 echo "First install: fully restart Antigravity. Updating: reopen the Antimetro tab."
