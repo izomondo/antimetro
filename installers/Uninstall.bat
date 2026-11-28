@@ -25,7 +25,9 @@ if exist "%PLUGIN_DIR%" (
 )
 
 echo.
-echo Note: Per-chat settings in ~/.gemini/antigravity/sidecar_data/antimetro
-echo were kept safe. Fully restart Antigravity to finish.
+echo Note: Your notes and per-chat settings in
+echo   %USERPROFILE%\.gemini\antigravity\sidecar_data\antimetro
+echo were kept safe. To remove all data completely, delete that folder manually.
+echo Fully restart Antigravity to finish.
 echo.
 pause

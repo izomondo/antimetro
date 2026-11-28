@@ -20,6 +20,9 @@ else
 fi
 
 echo ""
+echo "Note: Your notes and per-chat settings in"
+echo "  ~/.gemini/antigravity/sidecar_data/antimetro"
+echo "were kept safe. To remove all data completely, delete that folder manually."
 echo "Fully restart Antigravity to finish."
 echo ""
 if [ -t 0 ]; then

@@ -165,6 +165,63 @@ impl SettingsStore {
     }
 }
 
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
+struct ContextBreakdown {
+    system: u64,
+    summary: u64,
+    tools: u64,
+    replies: u64,
+    user: u64,
+}
+
+impl ContextBreakdown {
+    fn total(self) -> u64 {
+        self.system
+            .saturating_add(self.summary)
+            .saturating_add(self.tools)
+            .saturating_add(self.replies)
+            .saturating_add(self.user)
+    }
+
+    fn scale_to(&mut self, target: u64) {
+        let cur = self.total();
+        if cur == 0 || target == 0 {
+            *self = Self::default();
+            return;
+        }
+        if cur == target {
+            return;
+        }
+        let scale = |v: u64| ((v as u128).saturating_mul(target as u128) / (cur as u128)) as u64;
+        self.system = scale(self.system);
+        self.summary = scale(self.summary);
+        self.tools = scale(self.tools);
+        self.replies = scale(self.replies);
+        self.user = scale(self.user);
+        let scaled = self.total();
+        if target > scaled {
+            let diff = target - scaled;
+            let max_val = self
+                .tools
+                .max(self.system)
+                .max(self.replies)
+                .max(self.summary)
+                .max(self.user);
+            if self.tools == max_val {
+                self.tools = self.tools.saturating_add(diff);
+            } else if self.system == max_val {
+                self.system = self.system.saturating_add(diff);
+            } else if self.replies == max_val {
+                self.replies = self.replies.saturating_add(diff);
+            } else if self.summary == max_val {
+                self.summary = self.summary.saturating_add(diff);
+            } else {
+                self.user = self.user.saturating_add(diff);
+            }
+        }
+    }
+}
+
 #[derive(Default, Clone)]
 struct ChatScanSummary {
     user_messages: u64,
@@ -185,6 +242,7 @@ struct ChatScanSummary {
     has_bg_work: bool,
     turn_finished: bool,
     active_quota_group: ModelGroup,
+    breakdown: ContextBreakdown,
 }
 
 #[derive(Default, Clone)]
@@ -213,6 +271,11 @@ struct ChatScanState {
     is_busy: bool,
     turn_finished: bool,
     active_quota_group: ModelGroup,
+    breakdown: ContextBreakdown,
+    breakdown_initialized: bool,
+    prev_planner_output: u64,
+    pending_user_bytes: u64,
+    pending_tool_bytes: u64,
 }
 
 impl ChatScanState {
@@ -237,6 +300,7 @@ impl ChatScanState {
             has_bg_work,
             turn_finished: self.turn_finished && !has_bg_work,
             active_quota_group: self.active_quota_group,
+            breakdown: self.breakdown,
         }
     }
 }
@@ -383,6 +447,7 @@ struct StepMetrics {
     input_tokens: u64,
     cache_read_tokens: u64,
     output_tokens: u64,
+    content_bytes: u64,
     has_tokens: bool,
     has_content: bool,
     has_tool_calls: bool,
@@ -3957,6 +4022,16 @@ fn apply_step_to_scan(pending: &mut ChatScanState, m: &StepMetrics) {
         }
     }
 
+    if is_user {
+        pending.pending_user_bytes = pending
+            .pending_user_bytes
+            .saturating_add(m.content_bytes.max(1));
+    } else if matches!(m.kind, StepKind::Generic | StepKind::SystemMessage) {
+        pending.pending_tool_bytes = pending
+            .pending_tool_bytes
+            .saturating_add(m.content_bytes.max(1));
+    }
+
     if m.kind == StepKind::Checkpoint {
         let prev_tokens = if pending.has_context_data {
             pending.context_tokens
@@ -3975,6 +4050,14 @@ fn apply_step_to_scan(pending: &mut ChatScanState, m: &StepMetrics) {
         pending.has_context_data = true;
         pending.just_compressed = true;
         pending.session_baseline_tokens = Some(m.output_tokens);
+        pending.breakdown = ContextBreakdown {
+            summary: m.output_tokens,
+            ..Default::default()
+        };
+        pending.breakdown_initialized = false;
+        pending.prev_planner_output = 0;
+        pending.pending_user_bytes = 0;
+        pending.pending_tool_bytes = 0;
     } else if m.kind == StepKind::PlannerResponse && m.has_tokens {
         let total = m.cache_read_tokens.saturating_add(m.input_tokens);
         if total > 0 {
@@ -3989,6 +4072,59 @@ fn apply_step_to_scan(pending: &mut ChatScanState, m: &StepMetrics) {
             pending.has_delta = true;
             pending.context_tokens = total;
             pending.has_context_data = true;
+
+            if !pending.breakdown_initialized {
+                let summary_tok = pending.breakdown.summary.min(total);
+                let after_summary = total.saturating_sub(summary_tok);
+                let est_user = if pending.pending_user_bytes > 0 {
+                    (pending.pending_user_bytes / 4).min(after_summary / 2)
+                } else {
+                    0
+                };
+                pending.breakdown = ContextBreakdown {
+                    system: after_summary.saturating_sub(est_user),
+                    summary: summary_tok,
+                    tools: 0,
+                    replies: 0,
+                    user: est_user,
+                };
+                pending.breakdown_initialized = true;
+            } else {
+                let prev_total = pending.breakdown.total();
+                if total > prev_total {
+                    let delta = total - prev_total;
+                    let reply_add = pending.prev_planner_output.min(delta);
+                    pending.breakdown.replies = pending.breakdown.replies.saturating_add(reply_add);
+                    let rem = delta - reply_add;
+                    if rem > 0 {
+                        let ub = pending.pending_user_bytes;
+                        let tb = pending.pending_tool_bytes;
+                        if tb > 0 && ub == 0 {
+                            pending.breakdown.tools = pending.breakdown.tools.saturating_add(rem);
+                        } else if ub > 0 && tb == 0 {
+                            pending.breakdown.user = pending.breakdown.user.saturating_add(rem);
+                        } else if ub > 0 && tb > 0 {
+                            let sum_b = ub.saturating_add(tb);
+                            let user_part = ((rem as u128)
+                                .saturating_mul(ub as u128)
+                                / (sum_b as u128)) as u64;
+                            pending.breakdown.user =
+                                pending.breakdown.user.saturating_add(user_part);
+                            pending.breakdown.tools = pending
+                                .breakdown
+                                .tools
+                                .saturating_add(rem.saturating_sub(user_part));
+                        } else {
+                            pending.breakdown.system = pending.breakdown.system.saturating_add(rem);
+                        }
+                    }
+                } else if total < prev_total {
+                    pending.breakdown.scale_to(total);
+                }
+            }
+            pending.prev_planner_output = m.output_tokens;
+            pending.pending_user_bytes = 0;
+            pending.pending_tool_bytes = 0;
         }
     }
 
@@ -4130,7 +4266,7 @@ fn format_scan_json(etag: &str, settings_json: &str, scan: &ChatScanSummary) -> 
     };
 
     format!(
-        r#"{{"status":"ok","etag":"{}","context_tokens":{},"step_index":{},"message_count":{},"user_messages":{},"model_messages":{},"checkpoint_count":{},"last_checkpoint_step":{},"undo_step_index":{},"compact_in_flight":{},"first_message_at":"{}","last_message_at":"{}","has_delta":{},"delta_tokens":{},"just_compressed":{},"is_busy":{},"has_bg_work":{},"turn_finished":{},"active_quota_group":"{}","settings":{}}}"#,
+        r#"{{"status":"ok","etag":"{}","context_tokens":{},"step_index":{},"message_count":{},"user_messages":{},"model_messages":{},"checkpoint_count":{},"last_checkpoint_step":{},"undo_step_index":{},"compact_in_flight":{},"first_message_at":"{}","last_message_at":"{}","has_delta":{},"delta_tokens":{},"just_compressed":{},"is_busy":{},"has_bg_work":{},"turn_finished":{},"active_quota_group":"{}","breakdown":{{"tools":{},"replies":{},"system":{},"user":{},"summary":{}}},"settings":{}}}"#,
         json_escape(etag),
         scan.context_tokens,
         scan.latest_step_index,
@@ -4150,6 +4286,11 @@ fn format_scan_json(etag: &str, settings_json: &str, scan: &ChatScanSummary) -> 
         scan.has_bg_work,
         scan.turn_finished,
         scan.active_quota_group.as_str(),
+        scan.breakdown.tools,
+        scan.breakdown.replies,
+        scan.breakdown.system,
+        scan.breakdown.user,
+        scan.breakdown.summary,
         settings_json,
     )
 }
@@ -4289,6 +4430,7 @@ fn parse_line(b: &[u8]) -> Option<StepMetrics> {
             }
             "content" => {
                 if val_slice.first() == Some(&b'"') {
+                    m.content_bytes = val_slice.len().saturating_sub(2) as u64;
                     let mut look = 1;
                     skip_ws(val_slice, &mut look);
                     if val_slice.get(look) != Some(&b'"') {
@@ -5592,5 +5734,36 @@ mod tests {
         let line = br#"{"step_index":3,"type":"PLANNER_RESPONSE","status":"DONE","model":"gemini-4-neon-medium","input_tokens":1000,"cache_read_tokens":500}"#;
         let parsed = parse_line(line).expect("parse_line");
         assert_eq!(parsed.model_group, ModelGroup::Gemini);
+    }
+
+    #[test]
+    fn context_breakdown_tracks_system_user_tools_replies_and_summary() {
+        let lines = [
+            r#"{"step_index":0,"type":"USER_INPUT","status":"DONE","content":"hello world 1234567890"}"#,
+            r#"{"step_index":1,"type":"PLANNER_RESPONSE","status":"DONE","input_tokens":10000,"cache_read_tokens":0,"output_tokens":500,"tool_calls":[{"name":"read_file"}]}"#,
+            r#"{"step_index":2,"type":"GENERIC","status":"DONE","content":"file output contents here"}"#,
+            r#"{"step_index":3,"type":"PLANNER_RESPONSE","status":"DONE","input_tokens":4500,"cache_read_tokens":10000,"output_tokens":300,"content":"done"}"#,
+            r#"{"step_index":4,"type":"USER_INPUT","status":"DONE","content":"next question"}"#,
+            r#"{"step_index":5,"type":"PLANNER_RESPONSE","status":"DONE","input_tokens":800,"cache_read_tokens":14500,"output_tokens":200,"content":"answer"}"#,
+        ];
+        let mut scan = ChatScanState::default();
+        for raw in lines {
+            let m = parse_line(raw.as_bytes()).expect("parse line");
+            push_step_to_scan(&mut scan, m);
+        }
+        assert_eq!(scan.context_tokens, 15_300);
+        assert_eq!(scan.breakdown.total(), 15_300);
+        assert_eq!(scan.breakdown.tools, 4_000);
+        assert_eq!(scan.breakdown.replies, 800);
+        assert!(scan.breakdown.system > 9_000);
+        assert!(scan.breakdown.user >= 500);
+
+        let cp = parse_line(
+            br#"{"step_index":6,"type":"CHECKPOINT","status":"DONE","output_tokens":2400}"#,
+        )
+        .expect("checkpoint");
+        push_step_to_scan(&mut scan, cp);
+        assert_eq!(scan.breakdown.summary, 2_400);
+        assert_eq!(scan.breakdown.total(), 2_400);
     }
 }

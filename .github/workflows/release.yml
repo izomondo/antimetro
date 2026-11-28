@@ -41,6 +41,11 @@ jobs:
         if: matrix.os == 'windows-latest'
         shell: pwsh
         run: |
+          $ver = "${{ github.ref_name }}"
+          if (-not $ver.StartsWith("v")) {
+            $m = Select-String -Path "Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1
+            $ver = "v" + $m.Matches[0].Groups[1].Value
+          }
           cargo build --release --target x86_64-pc-windows-msvc
           New-Item -ItemType Directory -Path dist, out -Force | Out-Null
           Copy-Item "target/x86_64-pc-windows-msvc/release/antimetro.exe" "dist/antimetro.exe"
@@ -49,14 +54,18 @@ jobs:
           Copy-Item "installers/Uninstall.bat" "dist/Uninstall.bat"
           Copy-Item "LICENSE" "dist/LICENSE"
           Copy-Item "NOTICE" "dist/NOTICE"
-          Compress-Archive -Path "dist/*" -DestinationPath "out/Antimetro-Windows-x64.zip" -Force
+          Compress-Archive -Path "dist/*" -DestinationPath "out/Antimetro-$ver-Windows-x64.zip" -Force
 
       - name: Build and package macOS (arm64 + x64)
         if: startsWith(matrix.os, 'macos')
         shell: bash
         run: |
+          ver="${{ github.ref_name }}"
+          if [[ "${ver}" != v* ]]; then
+            ver="v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          fi
           mkdir -p out
-          for pair in "aarch64-apple-darwin:Antimetro-macOS-arm64" "x86_64-apple-darwin:Antimetro-macOS-x64"; do
+          for pair in "aarch64-apple-darwin:Antimetro-${ver}-macOS-arm64" "x86_64-apple-darwin:Antimetro-${ver}-macOS-x64"; do
             target="${pair%%:*}"
             artifact="${pair##*:}"
             cargo build --release --target "${target}"
@@ -77,6 +86,10 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
         shell: bash
         run: |
+          ver="${{ github.ref_name }}"
+          if [[ "${ver}" != v* ]]; then
+            ver="v$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)"
+          fi
           cargo build --release --target x86_64-unknown-linux-musl
           mkdir -p dist out
           cp "target/x86_64-unknown-linux-musl/release/antimetro" "dist/antimetro"
@@ -87,7 +100,7 @@ jobs:
           chmod +x "dist/install.sh" "dist/uninstall.sh"
           cp "LICENSE" "dist/LICENSE"
           cp "NOTICE" "dist/NOTICE"
-          tar -czf "out/Antimetro-Linux-x64.tar.gz" -C dist .
+          tar -czf "out/Antimetro-${ver}-Linux-x64.tar.gz" -C dist .
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v6

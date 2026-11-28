@@ -4,6 +4,32 @@ Track new features, improvements, and bug fixes in **Antimetro** for Google Anti
 
 ---
 
+## v1.5.0
+
+**November 28, 2026**
+
+### Context Breakdown Tooltip, Drag-and-Drop Notes Reordering, Clearer Delete Confirmation, and Versioned Release Archives
+
+This release adds a live context breakdown tooltip on the main token counter, smooth drag-and-drop card reordering in **Notes**, a two-step read/select and edit click flow for note cards, instant color-highlighted delete confirmation buttons, native desktop cursor hygiene, zero-reflow note expansion, versioned release archive filenames, clearer clean-uninstall guidance, and updated **Antigravity 2.36.0** compatibility. It includes **8 improvements** and **2 fixes**.
+
+### Improvements (8)
+
+- **Context breakdown on hover:** Hovering the main token counter now shows a clean tabular breakdown of what fills your current context window (`Tools`, `System`, `Replies`, `Summary`, `You`) with exact token counts and percentages, computed incrementally with zero extra parsing overhead.
+- **Two-step read/select & edit flow for Notes:** Clicking a collapsed note card now expands it with its blue active border and `Copy` action ready for reading or text selection without forcing a cursor at the start; clicking anywhere inside the expanded card then places the editing cursor exactly where you clicked (and clicking the bottom padding jumps cleanly to the end).
+- **Drag-and-drop Notes reordering:** Hovering the top-center header area of any note card in a group of 2+ cards reveals a subtle drag handle so you can smoothly reorder cards within your pinned or unpinned sections with live FLIP animations, strict group bounds, and automatic persistence.
+- **Clearer & smoother card deletion (`✓` / `×`):** Clicking the trash icon on a note card now immediately highlights the confirm checkmark in green and cancel cross in red, and smoothly animates card removal with remaining cards gliding into place.
+- **Native desktop cursor & selection hygiene:** Eliminated stray I-beam text cursors over counters, dates, scale ticks, and labels, and blocked accidental text selection when dragging across collapsed note cards.
+- **Antigravity 2.36.0 compatibility:** Updated compatibility verification metadata for **Antigravity App 2.0 (v2.36.0)**.
+- **Versioned release archives:** GitHub Release downloads now include the release tag in filenames (`Antimetro-v1.5.0-Windows-x64.zip`, `Antimetro-v1.5.0-macOS-arm64.zip`, `Antimetro-v1.5.0-macOS-x64.zip`, `Antimetro-v1.5.0-Linux-x64.tar.gz`) so updates never collide in your Downloads folder.
+- **Clearer clean-uninstall instructions:** Added a concise **Uninstalling** section to `README.md` and matching notes in `Uninstall.bat` / `Uninstall.command` explaining that user notes and per-chat settings in `~/.gemini/antigravity/sidecar_data/antimetro` are preserved for safety and can be deleted manually for a clean removal.
+
+### Fixes (2)
+
+- **Quota refresh after minimized turn:** If a model finished its reply while the Antigravity window was minimized or hidden, the post-turn quota refresh is now queued and executed immediately when you restore or focus the window instead of being silently dropped.
+- **Zero-reflow note card expansion:** Compensated the `3px` inner scrollbar width (`7px` vs `4px` right padding) so expanding a long note card never shifts line wraps when its scrollbar appears.
+
+---
+
 ## v1.4.1
 
 **November 27, 2026**

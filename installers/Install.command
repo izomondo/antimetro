@@ -2,7 +2,7 @@
 set -euo pipefail
 
 echo "==================================================="
-echo "  Installing Antimetro v1.4.1 for Antigravity 2.0"
+echo "  Installing Antimetro v1.5.0 for Antigravity 2.0"
 echo "==================================================="
 echo ""
 
@@ -33,7 +33,7 @@ cat > "${PLUGIN_DIR}/plugin.json" <<'EOF'
 {
   "name": "antimetro",
   "displayName": "Antimetro",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Live context token meter, model quota rings, smart auto-compact, per-chat notes, and instant cross-chat search for Antigravity App 2.0.",
   "logo": "assets/logo.svg",
   "author": {
@@ -70,7 +70,7 @@ cat > "${SIDECAR_DIR}/sidecar.json" <<EOF
 }
 EOF
 
-echo "[OK] Antimetro v1.4.1 has been installed!"
+echo "[OK] Antimetro v1.5.0 has been installed!"
 echo ""
 echo "First-time install: fully restart Antigravity and open Antimetro in the right Side Panel."
 echo "Updating an existing install: just reopen the Antimetro tab."

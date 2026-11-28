@@ -1,6 +1,6 @@
 [package]
 name = "antimetro"
-version = "1.4.1"
+version = "1.5.0"
 edition = "2021"
 authors = ["Varma <founder@izomondo.com>"]
 license = "Apache-2.0"
